@@ -10,6 +10,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use super::spectrum::{self, BANDS};
 
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
@@ -43,6 +46,8 @@ pub struct Shared {
     pub finished_generation: AtomicU64,
     pub now: Mutex<Option<Track>>,
     pub error: Mutex<Option<String>>,
+    /// Amplitudes du spectre par bande (0..1), pour l'analyseur visuel.
+    pub spectrum: Mutex<[f32; BANDS]>,
 }
 
 impl Shared {
@@ -56,7 +61,13 @@ impl Shared {
             finished_generation: AtomicU64::new(0),
             now: Mutex::new(None),
             error: Mutex::new(None),
+            spectrum: Mutex::new([0.0; BANDS]),
         })
+    }
+
+    /// Remet le spectre à zéro (pause, stop, fin).
+    fn clear_spectrum(&self) {
+        *self.spectrum.lock().unwrap() = [0.0; BANDS];
     }
 }
 
@@ -241,6 +252,9 @@ fn decode_loop(
     let mut spec_rate = 0u32;
     let mut frames_total: u64 = 0;
     let mut paused = false;
+    // Buffer mono glissant + horodatage pour throttler l'analyseur de spectre.
+    let mut mono: Vec<f32> = Vec::with_capacity(spectrum::FFT_SIZE * 2);
+    let mut last_fft = Instant::now();
 
     shared.playing.store(true, Ordering::Relaxed);
 
@@ -253,6 +267,7 @@ fn decode_loop(
                     paused = true;
                     sink = None; // coupe le son immédiatement
                     shared.playing.store(false, Ordering::Relaxed);
+                    shared.clear_spectrum();
                 }
                 Some(Command::Resume) => {
                     paused = false;
@@ -262,6 +277,7 @@ fn decode_loop(
                     shared.position_ms.store(0, Ordering::Relaxed);
                     shared.duration_ms.store(0, Ordering::Relaxed);
                     *shared.now.lock().unwrap() = None;
+                    shared.clear_spectrum();
                     return Ok(Flow::Stopped);
                 }
                 Some(Command::Play(u)) => return Ok(Flow::Switch(u)),
@@ -329,6 +345,35 @@ fn decode_loop(
             let pos = frames_total * 1000 / spec_rate as u64;
             shared.position_ms.store(pos, Ordering::Relaxed);
         }
+
+        // --- Analyseur de spectre (throttlé ~22 Hz, coût négligeable) ---
+        push_mono(&mut mono, sbuf.samples(), spec.channels.count());
+        if last_fft.elapsed() >= Duration::from_millis(45) && mono.len() >= spectrum::FFT_SIZE {
+            let start = mono.len() - spectrum::FFT_SIZE;
+            let raw = spectrum::compute_bands(&mono[start..]);
+            if let Ok(mut s) = shared.spectrum.lock() {
+                for i in 0..BANDS {
+                    // Attaque immédiate, décroissance douce (barres qui retombent).
+                    s[i] = raw[i].max(s[i] * 0.80);
+                }
+            }
+            if mono.len() > spectrum::FFT_SIZE * 2 {
+                let cut = mono.len() - spectrum::FFT_SIZE;
+                mono.drain(..cut);
+            }
+            last_fft = Instant::now();
+        }
+    }
+}
+
+/// Ajoute au buffer mono le mixage des échantillons i16 entrelacés (→ f32).
+fn push_mono(buf: &mut Vec<f32>, samples: &[i16], channels: usize) {
+    if channels == 0 {
+        return;
+    }
+    for frame in samples.chunks(channels) {
+        let sum: i32 = frame.iter().map(|&s| s as i32).sum();
+        buf.push(sum as f32 / (channels as f32 * 32768.0));
     }
 }
 

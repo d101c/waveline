@@ -99,6 +99,8 @@ pub struct Playback {
     pub position_ms: u64,
     pub duration_ms: u64,
     pub volume: u8,
+    /// Amplitudes du spectre par bande (0..1), pour l'analyseur visuel.
+    pub spectrum: Vec<f32>,
 }
 
 /// Effets de bord à exécuter sur le moteur audio.

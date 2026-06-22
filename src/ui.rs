@@ -74,7 +74,7 @@ pub fn draw(f: &mut Frame, app: &App, theme: &Theme) -> Regions {
     // Terminal dégénéré (trop petit / taille nulle) : on évite tout rendu qui
     // indexerait hors du buffer, et on invite à agrandir si la place le permet.
     let area = f.area();
-    if area.width < 20 || area.height < 8 {
+    if area.width < 24 || area.height < 12 {
         if area.width >= 1 && area.height >= 1 {
             f.render_widget(
                 Paragraph::new("waveline : agrandis le terminal")
@@ -90,7 +90,7 @@ pub fn draw(f: &mut Frame, app: &App, theme: &Theme) -> Regions {
         .constraints([
             Constraint::Length(1), // header
             Constraint::Min(3),    // corps
-            Constraint::Length(3), // barre de lecture
+            Constraint::Length(6), // barre de lecture + analyseur
             Constraint::Length(1), // ligne de statut + raccourcis
         ])
         .split(f.area());
@@ -264,7 +264,11 @@ fn draw_playbar(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut R
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(1), // morceau + volume
+            Constraint::Min(1),    // analyseur de spectre
+            Constraint::Length(1), // progression
+        ])
         .split(inner);
 
     let pb = &app.playback;
@@ -327,7 +331,49 @@ fn draw_playbar(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut R
         .unfilled_style(Style::default().fg(theme.border))
         .ratio(ratio)
         .label(Span::styled(label, Style::default().fg(theme.dim)));
-    f.render_widget(gauge, rows[1]);
+
+    // Analyseur de spectre au milieu, progression en bas.
+    draw_spectrum(f, rows[1], &pb.spectrum);
+    f.render_widget(gauge, rows[2]);
+}
+
+/// Dessine l'analyseur de spectre : une barre verticale par bande, en blocs.
+fn draw_spectrum(f: &mut Frame, area: Rect, bands: &[f32]) {
+    if area.width == 0 || area.height == 0 || bands.is_empty() {
+        return;
+    }
+    const BLOCKS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    const PER_ROW: usize = 8;
+    let n = bands.len();
+    let bar_w = (area.width as usize / n).max(1);
+    let total_levels = area.height as usize * PER_ROW;
+
+    for row in 0..area.height {
+        // La ligne du haut correspond aux niveaux les plus élevés.
+        let from_bottom = (area.height - 1 - row) as usize;
+        let base = from_bottom * PER_ROW;
+        let mut spans: Vec<Span> = Vec::with_capacity(n);
+        for (i, &v) in bands.iter().enumerate() {
+            let filled = (v.clamp(0.0, 1.0) * total_levels as f32).round() as usize;
+            let lvl = filled.saturating_sub(base).min(PER_ROW);
+            let s: String = std::iter::repeat(BLOCKS[lvl]).take(bar_w).collect();
+            spans.push(Span::styled(s, Style::default().fg(band_color(i, n))));
+        }
+        let y = area.y + row;
+        f.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect::new(area.x, y, area.width, 1),
+        );
+    }
+}
+
+/// Dégradé vert (graves) → rouge (aigus) pour colorer les bandes.
+fn band_color(i: usize, n: usize) -> ratatui::style::Color {
+    let t = if n <= 1 { 0.0 } else { i as f32 / (n - 1) as f32 };
+    let r = (40.0 + t * 215.0) as u8;
+    let g = (220.0 - t * 150.0) as u8;
+    let b = (120.0 - t * 80.0) as u8;
+    ratatui::style::Color::Rgb(r, g, b)
 }
 
 fn draw_status(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {

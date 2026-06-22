@@ -4,5 +4,7 @@
 mod player;
 mod sink;
 mod source;
+pub mod spectrum;
 
 pub use player::Player;
+pub use spectrum::BANDS;

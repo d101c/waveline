@@ -157,6 +157,9 @@ fn sync_playback(app: &mut App, player: &Player) {
     if let Ok(now) = s.now.lock() {
         app.playback.current = now.clone();
     }
+    if let Ok(spec) = s.spectrum.lock() {
+        app.playback.spectrum = spec.to_vec();
+    }
     if let Ok(mut err) = s.error.lock() {
         if let Some(e) = err.take() {
             app.status = format!("⚠ {e}");
