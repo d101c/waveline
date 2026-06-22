@@ -17,13 +17,25 @@
 
 ## Installer
 
+**Disponible maintenant** (Linux x86_64/aarch64) :
+
 ```sh
-npx waveline            # essai immédiat (Linux, Node ≥ 14)
-cargo install waveline  # depuis crates.io
-cargo binstall waveline # binaire pré-compilé, sans build
+cargo install --git https://github.com/d101c/waveline   # build depuis les sources
 ```
 
-Arch : `yay -S waveline-bin`. Autres canaux & publication : [`docs/PUBLISHING.md`](docs/PUBLISHING.md).
+Ou télécharge un binaire statique prêt à l'emploi depuis les
+[Releases](https://github.com/d101c/waveline/releases).
+
+**Bientôt** (après publication sur les registres) :
+
+```sh
+npx waveline            # essai immédiat (Node ≥ 14)
+cargo install waveline  # depuis crates.io
+cargo binstall waveline # binaire pré-compilé
+yay -S waveline-bin     # Arch (AUR)
+```
+
+Détails & étapes de publication : [`docs/PUBLISHING.md`](docs/PUBLISHING.md).
 
 ```
 ┌ waveline ───────────────────────────────────[ Tout  SC  MC ]─┐
