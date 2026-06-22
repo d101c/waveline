@@ -5,7 +5,10 @@
 //! logique d'état vit dans [`app`], le rendu dans [`ui`].
 
 mod app;
+mod b64;
+mod http;
 mod model;
+mod providers;
 mod theme;
 mod ui;
 
@@ -31,6 +34,12 @@ use ui::Regions;
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 fn main() -> io::Result<()> {
+    // Mode debug hors-TUI : `waveline resolve <url>` affiche le flux résolu.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|s| s.as_str()) == Some("resolve") {
+        return debug_resolve(args.get(2).map(|s| s.as_str()));
+    }
+
     let mut terminal = setup_terminal()?;
     let theme = Theme::dark();
     let mut app = App::new();
@@ -141,6 +150,50 @@ fn handle_mouse(app: &mut App, regions: &Regions, m: MouseEvent) {
             app.apply(Action::Up);
         }
         _ => {}
+    }
+}
+
+// --- Mode debug ---------------------------------------------------------------
+
+fn debug_resolve(url: Option<&str>) -> io::Result<()> {
+    let Some(url) = url else {
+        eprintln!("usage: waveline resolve <url soundcloud|mixcloud>");
+        std::process::exit(2);
+    };
+    let agent = http::agent();
+    match providers::resolve_url(&agent, url) {
+        Ok((track, source)) => {
+            println!("Plateforme : {}", track.platform);
+            println!("Titre      : {}", track.title);
+            println!("Artiste    : {}", track.artist);
+            println!("Durée      : {}", track.duration_human());
+            println!("Conteneur  : {:?}", source.container);
+            match source.kind {
+                providers::StreamKind::Progressive(u) => {
+                    println!("Flux       : progressif");
+                    println!("URL        : {}", truncate(&u, 100));
+                }
+                providers::StreamKind::HlsSegments(segs) => {
+                    println!("Flux       : HLS, {} segments", segs.len());
+                    if let Some(first) = segs.first() {
+                        println!("Segment 0  : {}", truncate(first, 100));
+                    }
+                }
+            }
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("Échec de résolution : {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(n).collect::<String>())
     }
 }
 
