@@ -21,12 +21,26 @@ pub fn is_encrypted(text: &str) -> bool {
 }
 
 /// Analyse un m3u8 et résout les URIs relatives par rapport à `base`.
+///
+/// Pour une playlist média en fragmented-MP4, le segment d'initialisation
+/// (`#EXT-X-MAP:URI=...`) est placé en tête de la liste : concaténé avec les
+/// segments, il forme un flux décodable d'un seul tenant.
 pub fn parse(text: &str, base: &str) -> Playlist {
     let is_master = text.contains("#EXT-X-STREAM-INF");
     let mut uris = Vec::new();
+    let mut init: Option<String> = None;
     for line in text.lines() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("#EXT-X-MAP:") {
+            if let Some(uri) = extract_uri_attr(rest) {
+                init = Some(resolve_uri(base, &uri));
+            }
+            continue;
+        }
+        if line.starts_with('#') {
             continue;
         }
         uris.push(resolve_uri(base, line));
@@ -34,8 +48,19 @@ pub fn parse(text: &str, base: &str) -> Playlist {
     if is_master {
         Playlist::Master(uris)
     } else {
+        if let Some(init) = init {
+            uris.insert(0, init);
+        }
         Playlist::Media(uris)
     }
+}
+
+/// Extrait la valeur de l'attribut `URI="..."` d'une ligne de tag HLS.
+fn extract_uri_attr(s: &str) -> Option<String> {
+    let start = s.find("URI=\"")? + 5;
+    let rest = &s[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }
 
 /// Résout une URI éventuellement relative contre l'URL de la playlist.

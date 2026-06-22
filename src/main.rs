@@ -5,6 +5,7 @@
 //! logique d'état vit dans [`app`], le rendu dans [`ui`].
 
 mod app;
+mod audio;
 mod b64;
 mod http;
 mod model;
@@ -38,6 +39,9 @@ fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(|s| s.as_str()) == Some("resolve") {
         return debug_resolve(args.get(2).map(|s| s.as_str()));
+    }
+    if args.get(1).map(|s| s.as_str()) == Some("play") {
+        return debug_play(args.get(2).map(|s| s.as_str()), args.get(3).map(|s| s.as_str()));
     }
 
     let mut terminal = setup_terminal()?;
@@ -187,6 +191,46 @@ fn debug_resolve(url: Option<&str>) -> io::Result<()> {
             std::process::exit(1);
         }
     }
+}
+
+/// `waveline play <url> [secondes]` : joue le flux N secondes (test du moteur).
+fn debug_play(url: Option<&str>, secs: Option<&str>) -> io::Result<()> {
+    use std::sync::atomic::Ordering;
+    let Some(url) = url else {
+        eprintln!("usage: waveline play <url> [secondes]");
+        std::process::exit(2);
+    };
+    let limit = secs.and_then(|s| s.parse::<u64>().ok()).unwrap_or(10);
+    let player = audio::Player::new(80);
+    player.play_url(url);
+    let shared = player.shared();
+    let start = std::time::Instant::now();
+    println!("Lecture {limit}s de : {url}");
+    loop {
+        std::thread::sleep(Duration::from_millis(300));
+        if let Some(err) = shared.error.lock().unwrap().clone() {
+            eprintln!("Erreur : {err}");
+            std::process::exit(1);
+        }
+        let pos = shared.position_ms.load(Ordering::Relaxed);
+        let dur = shared.duration_ms.load(Ordering::Relaxed);
+        let loading = shared.loading.load(Ordering::Relaxed);
+        let playing = shared.playing.load(Ordering::Relaxed);
+        print!(
+            "\r  {} pos={}.{:02}s / {}s   ",
+            if loading { "⏳" } else if playing { "▶" } else { "⏸" },
+            pos / 1000,
+            (pos % 1000) / 10,
+            dur / 1000
+        );
+        use std::io::Write as _;
+        let _ = io::stdout().flush();
+        if start.elapsed().as_secs() >= limit {
+            println!("\nFin du test.");
+            break;
+        }
+    }
+    Ok(())
 }
 
 fn truncate(s: &str, n: usize) -> String {
