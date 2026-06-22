@@ -6,4 +6,4 @@ mod sink;
 mod source;
 pub mod spectrum;
 
-pub use player::Player;
+pub use player::{Player, Shared};

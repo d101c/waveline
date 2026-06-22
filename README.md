@@ -35,6 +35,9 @@ chercher, et écouter les deux au même endroit, à la souris **ou** au clavier.
   de filtre, la barre play/pause ; ou tout au clavier en style vim.
 - **Analyseur de spectre intégré** — barres par bandes en temps réel sous la
   barre de lecture (FFT maison, calcul throttlé → coût CPU négligeable).
+- **Touches média & contrôles du bureau** — via MPRIS (D-Bus) : Play/Pause,
+  Suivant, Précédent, Stop depuis les touches média du clavier, le panneau
+  GNOME et l'écran de verrouillage ; titre/artiste/durée y sont affichés.
 - **Avec et sans compte** — sans login : URLs publiques + recherche. Avec
   compte : saisis ton **pseudo** SoundCloud/Mixcloud (touche `c`) et tes
   **Likes / Playlists / Feed** se remplissent depuis les données publiques —
@@ -103,6 +106,7 @@ src/
 │   ├── sink.rs     sortie PCM via pw-play / aplay
 │   └── spectrum.rs FFT radix-2 maison + bandes (analyseur)
 ├── config.rs       pseudos de compte (~/.config/waveline)
+├── mpris.rs        serveur MPRIS (D-Bus) : touches média, contrôles bureau
 ├── http.rs         agent ureq partagé (UA navigateur)
 └── b64.rs          décodeur base64 (pour le XOR Mixcloud)
 ```
@@ -126,6 +130,7 @@ chaque frame. Ce découpage rend toute la navigation testable sans terminal.
 
 - [x] Mode **avec compte** par pseudo public (Likes / Playlists / Feed).
 - [x] Analyseur de spectre intégré.
+- [x] Touches média / contrôles bureau via MPRIS (D-Bus).
 - [ ] Likes *privés* SoundCloud via `oauth_token` collé (optionnel, hors CGU).
 - [ ] File d'attente persistante et historique.
 - [ ] Palette de commandes (`Ctrl-P`) et thèmes.

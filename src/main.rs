@@ -10,6 +10,7 @@ mod b64;
 mod config;
 mod http;
 mod model;
+mod mpris;
 mod providers;
 mod theme;
 mod ui;
@@ -31,7 +32,9 @@ use ratatui::Terminal;
 
 use app::{Action, App, Effect, Focus, Input};
 use audio::Player;
+use config::Config;
 use model::{Platform, Track};
+use mpris::MediaCommand;
 use theme::Theme;
 use ui::Regions;
 
@@ -92,12 +95,23 @@ fn run(terminal: &mut Tui, app: &mut App, theme: &Theme) -> io::Result<()> {
     let mut search_rx: Option<std::sync::mpsc::Receiver<Vec<Track>>> = None;
 
     // Comptes connectés (pseudos publics) chargés depuis la config.
-    let mut config = config::Config::load();
+    let mut config = Config::load();
     app.sc_handle = config.soundcloud.clone();
     app.mc_handle = config.mixcloud.clone();
 
+    // Intégration MPRIS : touches média / contrôles bureau. No-op sans D-Bus.
+    let (media_tx, media_rx) = std::sync::mpsc::channel::<MediaCommand>();
+    let _mpris = mpris::start(player.shared().clone(), media_tx);
+
     while !app.should_quit {
         sync_playback(app, &player);
+
+        // Commandes média externes (touches clavier, panneau, écran de verrou).
+        while let Ok(cmd) = media_rx.try_recv() {
+            if let Some(eff) = handle_media(app, cmd) {
+                dispatch_effect(eff, &player, app, &mut config, &mut search_rx);
+            }
+        }
 
         // Résultats de recherche prêts ?
         if let Some(rx) = &search_rx {
@@ -138,26 +152,66 @@ fn run(terminal: &mut Tui, app: &mut App, theme: &Theme) -> io::Result<()> {
                 _ => None,
             };
             if let Some(eff) = effect {
-                match eff {
-                    Effect::Search(q) => search_rx = Some(spawn_search(q)),
-                    Effect::LoadLibrary(sec) => {
-                        search_rx = Some(spawn_library(
-                            app.sc_handle.clone(),
-                            app.mc_handle.clone(),
-                            sec,
-                        ));
-                    }
-                    Effect::SaveAccounts => {
-                        config.soundcloud = app.sc_handle.clone();
-                        config.mixcloud = app.mc_handle.clone();
-                        config.save();
-                    }
-                    other => exec(&player, other),
-                }
+                dispatch_effect(eff, &player, app, &mut config, &mut search_rx);
             }
         }
     }
     Ok(())
+}
+
+/// Exécute un effet : audio direct, ou lancement de recherche/bibliothèque,
+/// ou sauvegarde des comptes. Partagé par le clavier, la souris et MPRIS.
+fn dispatch_effect(
+    eff: Effect,
+    player: &Player,
+    app: &App,
+    config: &mut Config,
+    search_rx: &mut Option<std::sync::mpsc::Receiver<Vec<Track>>>,
+) {
+    match eff {
+        Effect::Search(q) => *search_rx = Some(spawn_search(q)),
+        Effect::LoadLibrary(sec) => {
+            *search_rx = Some(spawn_library(app.sc_handle.clone(), app.mc_handle.clone(), sec));
+        }
+        Effect::SaveAccounts => {
+            config.soundcloud = app.sc_handle.clone();
+            config.mixcloud = app.mc_handle.clone();
+            config.save();
+        }
+        other => exec(player, other),
+    }
+}
+
+/// Traduit une commande média externe (MPRIS) en effet, comme une touche.
+fn handle_media(app: &mut App, cmd: MediaCommand) -> Option<Effect> {
+    match cmd {
+        MediaCommand::PlayPause => app.apply(Action::PlayPause),
+        MediaCommand::Next => app.apply(Action::Next),
+        MediaCommand::Prev => app.apply(Action::Prev),
+        MediaCommand::Play => {
+            if !app.playback.playing {
+                app.apply(Action::PlayPause)
+            } else {
+                None
+            }
+        }
+        MediaCommand::Pause => {
+            if app.playback.playing {
+                app.apply(Action::PlayPause)
+            } else {
+                None
+            }
+        }
+        MediaCommand::Stop => {
+            app.status = "Lecture arrêtée".into();
+            Some(Effect::Stop)
+        }
+        MediaCommand::SetVolume(v) => {
+            app.playback.volume = v.min(100);
+            Some(Effect::SetVolume(app.playback.volume))
+        }
+        MediaCommand::Quit => app.apply(Action::Quit),
+    }
 }
 
 /// Lance une recherche unifiée dans un thread ; le résultat arrive par le canal.

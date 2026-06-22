@@ -33,6 +33,12 @@ symphonia = { version = "0.5", default-features = false, features = [
 # chemins de config standards (~/.config, ~/.cache) — minuscule
 dirs = "5"
 
+# MPRIS (D-Bus) : touches média du clavier, contrôles GNOME, écran de verrou.
+# Pure Rust (zbus, async-io) — pas de libdbus système. Dégrade en no-op sans bus.
+mpris-server = "0.9"
+async-io = "2"
+futures-lite = "2"
+
 [profile.release]
 opt-level = 3
 lto = "thin"
