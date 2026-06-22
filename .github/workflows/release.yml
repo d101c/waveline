@@ -13,8 +13,24 @@ permissions:
   contents: write
 
 jobs:
+  # Crée la Release d'abord : sinon l'upload des binaires échoue avec
+  # « release not found » (l'action d'upload n'attache qu'à une Release existante).
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create release if missing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "${GITHUB_REF_NAME}" \
+            || gh release create "${GITHUB_REF_NAME}" \
+                 --title "waveline ${GITHUB_REF_NAME#v}" \
+                 --generate-notes
+
   upload-binaries:
     name: ${{ matrix.target }}
+    needs: create-release
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
