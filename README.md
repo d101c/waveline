@@ -20,6 +20,7 @@
 **Disponible maintenant** (Linux x86_64/aarch64) :
 
 ```sh
+brew install d101c/tap/waveline                         # Homebrew (Linuxbrew)
 cargo install --git https://github.com/d101c/waveline   # build depuis les sources
 ```
 
