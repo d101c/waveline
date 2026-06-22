@@ -15,7 +15,6 @@ use crate::model::{Platform, Track};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Container {
     Mp3,
-    Aac,
     Mp4,
     Ogg,
     Unknown,

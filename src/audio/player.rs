@@ -208,7 +208,7 @@ fn decode_loop(
     let mut hint = Hint::new();
     match container {
         Container::Mp3 => hint.with_extension("mp3"),
-        Container::Mp4 | Container::Aac => hint.with_extension("m4a"),
+        Container::Mp4 => hint.with_extension("m4a"),
         Container::Ogg => hint.with_extension("ogg"),
         Container::Unknown => &mut hint,
     };
@@ -258,7 +258,12 @@ fn decode_loop(
                     paused = false;
                     shared.playing.store(true, Ordering::Relaxed);
                 }
-                Some(Command::Stop) => return Ok(Flow::Stopped),
+                Some(Command::Stop) => {
+                    shared.position_ms.store(0, Ordering::Relaxed);
+                    shared.duration_ms.store(0, Ordering::Relaxed);
+                    *shared.now.lock().unwrap() = None;
+                    return Ok(Flow::Stopped);
+                }
                 Some(Command::Play(u)) => return Ok(Flow::Switch(u)),
                 Some(Command::Quit) => return Ok(Flow::Quit),
                 None => {

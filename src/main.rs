@@ -191,6 +191,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<Effect> {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return app.apply(Action::Quit);
     }
+    // Arrêt complet de la lecture.
+    if key.code == KeyCode::Char('s') {
+        app.status = "Lecture arrêtée".into();
+        return Some(Effect::Stop);
+    }
 
     let action = match key.code {
         KeyCode::Char('q') => Some(Action::Quit),
