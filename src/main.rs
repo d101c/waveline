@@ -1,8 +1,8 @@
 //! waveline — TUI unifiée Mixcloud + SoundCloud.
 //!
-//! Ce module assemble les briques : il gère le cycle de vie du terminal,
-//! traduit les événements clavier/souris en [`Action`] et redessine. Toute la
-//! logique d'état vit dans [`app`], le rendu dans [`ui`].
+//! Assemble les briques : cycle de vie du terminal, traduction des événements
+//! clavier/souris en [`Action`]/[`Effect`], exécution des effets sur le moteur
+//! audio et resynchronisation de l'affichage.
 
 mod app;
 mod audio;
@@ -14,6 +14,7 @@ mod theme;
 mod ui;
 
 use std::io::{self, Stdout};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use crossterm::event::{
@@ -27,7 +28,8 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use app::{Action, App, Focus};
+use app::{Action, App, Effect, Focus, Input};
+use audio::Player;
 use model::{Platform, Track};
 use theme::Theme;
 use ui::Regions;
@@ -35,13 +37,14 @@ use ui::Regions;
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 fn main() -> io::Result<()> {
-    // Mode debug hors-TUI : `waveline resolve <url>` affiche le flux résolu.
+    // Modes debug hors-TUI.
     let args: Vec<String> = std::env::args().collect();
-    if args.get(1).map(|s| s.as_str()) == Some("resolve") {
-        return debug_resolve(args.get(2).map(|s| s.as_str()));
-    }
-    if args.get(1).map(|s| s.as_str()) == Some("play") {
-        return debug_play(args.get(2).map(|s| s.as_str()), args.get(3).map(|s| s.as_str()));
+    match args.get(1).map(|s| s.as_str()) {
+        Some("resolve") => return debug_resolve(args.get(2).map(|s| s.as_str())),
+        Some("play") => {
+            return debug_play(args.get(2).map(|s| s.as_str()), args.get(3).map(|s| s.as_str()))
+        }
+        _ => {}
     }
 
     let mut terminal = setup_terminal()?;
@@ -56,33 +59,102 @@ fn main() -> io::Result<()> {
 }
 
 fn run(terminal: &mut Tui, app: &mut App, theme: &Theme) -> io::Result<()> {
+    let player = Player::new(app.playback.volume);
     let mut regions = Regions::default();
-    while !app.should_quit {
-        terminal.draw(|f| regions = ui::draw(f, app, theme))?;
+    let mut last_finished = player.shared().finished_generation.load(Ordering::Relaxed);
 
-        // Bloque jusqu'à un événement (pas de busy-loop). Le timeout permettra
-        // plus tard de rafraîchir la position de lecture.
+    while !app.should_quit {
+        sync_playback(app, &player);
+
+        // Enchaînement automatique quand un morceau se termine.
+        let fin = player.shared().finished_generation.load(Ordering::Relaxed);
+        if fin != last_finished {
+            last_finished = fin;
+            if let Some(eff) = app.apply(Action::Next) {
+                exec(&player, eff);
+            }
+        }
+
+        // Ne dessine que si le terminal a une taille exploitable (évite un
+        // panic d'indexation sur un buffer 0×0, p. ex. sans vrai pty).
+        let drawable = terminal
+            .size()
+            .map(|s| s.width > 0 && s.height > 0)
+            .unwrap_or(false);
+        if drawable {
+            terminal.draw(|f| regions = ui::draw(f, app, theme))?;
+        }
+
+        // Timeout court : rafraîchit la position de lecture ~4×/s.
         if event::poll(Duration::from_millis(250))? {
-            match event::read()? {
+            let effect = match event::read()? {
                 Event::Key(key) => handle_key(app, key),
                 Event::Mouse(m) => handle_mouse(app, &regions, m),
-                Event::Resize(_, _) => {}
-                _ => {}
+                _ => None,
+            };
+            if let Some(eff) = effect {
+                exec(&player, eff);
             }
         }
     }
     Ok(())
 }
 
-fn handle_key(app: &mut App, key: KeyEvent) {
+/// Exécute un effet sur le moteur audio.
+fn exec(player: &Player, effect: Effect) {
+    match effect {
+        Effect::Play(url) => player.play_url(url),
+        Effect::Toggle => player.toggle(),
+        Effect::Stop => player.stop(),
+        Effect::SetVolume(v) => player.set_volume(v),
+    }
+}
+
+/// Recopie l'état du moteur dans le modèle d'affichage.
+fn sync_playback(app: &mut App, player: &Player) {
+    let s = player.shared();
+    app.playback.position_ms = s.position_ms.load(Ordering::Relaxed);
+    app.playback.duration_ms = s.duration_ms.load(Ordering::Relaxed);
+    app.playback.playing = s.playing.load(Ordering::Relaxed);
+    app.playback.loading = s.loading.load(Ordering::Relaxed);
+    if let Ok(now) = s.now.lock() {
+        app.playback.current = now.clone();
+    }
+    if let Ok(mut err) = s.error.lock() {
+        if let Some(e) = err.take() {
+            app.status = format!("⚠ {e}");
+        }
+    }
+}
+
+fn handle_key(app: &mut App, key: KeyEvent) -> Option<Effect> {
     if key.kind != KeyEventKind::Press {
-        return;
+        return None;
     }
-    // Ctrl-C quitte toujours.
+    // En mode saisie, les touches alimentent la ligne de commande.
+    if matches!(app.input, Input::Command(_)) {
+        return match key.code {
+            KeyCode::Esc => {
+                app.input_cancel();
+                None
+            }
+            KeyCode::Enter => app.input_submit(),
+            KeyCode::Backspace => {
+                app.input_pop();
+                None
+            }
+            KeyCode::Char(c) => {
+                app.input_push(c);
+                None
+            }
+            _ => None,
+        };
+    }
+
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-        app.apply(Action::Quit);
-        return;
+        return app.apply(Action::Quit);
     }
+
     let action = match key.code {
         KeyCode::Char('q') => Some(Action::Quit),
         KeyCode::Char(' ') => Some(Action::PlayPause),
@@ -101,63 +173,61 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('1') => Some(Action::FilterAll),
         KeyCode::Char('2') => Some(Action::FilterSoundCloud),
         KeyCode::Char('3') => Some(Action::FilterMixcloud),
+        KeyCode::Char(':') => {
+            app.begin_command();
+            None
+        }
         KeyCode::Char('?') => {
             app.status =
-                "Aide : navigation j/k, tab change de panneau, enter joue, 1/2/3 filtre".into();
+                "Aide : ':' URL · j/k naviguer · enter/clic jouer · space pause · n/p · 1/2/3 filtre · q quitter".into();
             None
         }
         _ => None,
     };
-    if let Some(a) = action {
-        app.apply(a);
-    }
+    action.and_then(|a| app.apply(a))
 }
 
-fn handle_mouse(app: &mut App, regions: &Regions, m: MouseEvent) {
+fn handle_mouse(app: &mut App, regions: &Regions, m: MouseEvent) -> Option<Effect> {
     let (x, y) = (m.column, m.row);
     match m.kind {
         MouseEventKind::Down(MouseButton::Left) => {
-            // Onglet de filtre ?
             if let Some(filter) = regions.filter_at(x, y) {
-                match filter {
+                return match filter {
                     app::Filter::All => app.apply(Action::FilterAll),
                     app::Filter::Only(Platform::SoundCloud) => app.apply(Action::FilterSoundCloud),
                     app::Filter::Only(Platform::Mixcloud) => app.apply(Action::FilterMixcloud),
-                }
-                return;
+                };
             }
-            // Bouton play/pause ?
             if regions.playpause_at(x, y) {
-                app.apply(Action::PlayPause);
-                return;
+                return app.apply(Action::PlayPause);
             }
-            // Section de la sidebar ?
             if let Some(i) = regions.section_at(x, y) {
                 app.focus = Focus::Sidebar;
                 app.section_index = i;
                 app.section = app::Section::ALL[i];
-                app.apply(Action::Activate);
-                return;
+                return app.apply(Action::Activate);
             }
-            // Ligne de la liste ?
             if let Some(i) = regions.list_row_at(x, y) {
+                // Clic sur un morceau = sélection + lecture immédiate.
                 app.focus = Focus::List;
                 app.list_index = i;
+                return app.apply(Action::Activate);
             }
+            None
         }
         MouseEventKind::ScrollDown => {
             app.focus = Focus::List;
-            app.apply(Action::Down);
+            app.apply(Action::Down)
         }
         MouseEventKind::ScrollUp => {
             app.focus = Focus::List;
-            app.apply(Action::Up);
+            app.apply(Action::Up)
         }
-        _ => {}
+        _ => None,
     }
 }
 
-// --- Mode debug ---------------------------------------------------------------
+// --- Modes debug --------------------------------------------------------------
 
 fn debug_resolve(url: Option<&str>) -> io::Result<()> {
     let Some(url) = url else {
@@ -195,7 +265,6 @@ fn debug_resolve(url: Option<&str>) -> io::Result<()> {
 
 /// `waveline play <url> [secondes]` : joue le flux N secondes (test du moteur).
 fn debug_play(url: Option<&str>, secs: Option<&str>) -> io::Result<()> {
-    use std::sync::atomic::Ordering;
     let Some(url) = url else {
         eprintln!("usage: waveline play <url> [secondes]");
         std::process::exit(2);
@@ -218,7 +287,13 @@ fn debug_play(url: Option<&str>, secs: Option<&str>) -> io::Result<()> {
         let playing = shared.playing.load(Ordering::Relaxed);
         print!(
             "\r  {} pos={}.{:02}s / {}s   ",
-            if loading { "⏳" } else if playing { "▶" } else { "⏸" },
+            if loading {
+                "⏳"
+            } else if playing {
+                "▶"
+            } else {
+                "⏸"
+            },
             pos / 1000,
             (pos % 1000) / 10,
             dur / 1000
@@ -266,21 +341,29 @@ fn restore_terminal(terminal: &mut Tui) -> io::Result<()> {
 // --- Données de démonstration (remplacées par les providers ensuite) ----------
 
 fn demo_tracks() -> Vec<Track> {
-    let mk = |p: Platform, artist: &str, title: &str, ms: u64| Track {
+    // Vraies URLs jouables (libres de DRM) pour un premier contact concret.
+    let mk = |p: Platform, artist: &str, title: &str, url: &str, ms: u64| Track {
         platform: p,
-        id: format!("{artist}-{title}"),
+        id: url.into(),
         title: title.into(),
         artist: artist.into(),
-        permalink: "https://example.com".into(),
+        permalink: url.into(),
         duration_ms: Some(ms),
     };
     vec![
-        mk(Platform::SoundCloud, "Bonobo", "Kerala", 290_000),
-        mk(Platform::Mixcloud, "Ben UFO", "Rinse FM b2b set", 3_731_000),
-        mk(Platform::SoundCloud, "Four Tet", "Two Thousand and Seventeen", 250_000),
-        mk(Platform::Mixcloud, "Gilles Peterson", "Worldwide Show", 7_200_000),
-        mk(Platform::SoundCloud, "Floating Points", "LesAlpx", 380_000),
-        mk(Platform::Mixcloud, "The Blessed Madonna", "We Still Believe", 5_400_000),
-        mk(Platform::SoundCloud, "Jamie xx", "Gosh", 320_000),
+        mk(
+            Platform::SoundCloud,
+            "Hidaka",
+            "90's J-POP NON STOP DJ MIX",
+            "https://soundcloud.com/user-885578460/90s-j-pop-non-stop-mix",
+            4_233_000,
+        ),
+        mk(
+            Platform::Mixcloud,
+            "NTS Radio",
+            "Andy Butler / Hercules & Love Affair",
+            "https://www.mixcloud.com/NTSRadio/andy-butler-hercules-love-affair-19th-june-2026/",
+            3_584_000,
+        ),
     ]
 }

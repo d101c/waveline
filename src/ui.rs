@@ -12,7 +12,7 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use crate::app::{App, Filter, Focus, Section};
+use crate::app::{App, Filter, Focus, Input, Section};
 use crate::model::{fmt_duration, Platform};
 use crate::theme::Theme;
 
@@ -70,6 +70,20 @@ fn contains(r: &Rect, x: u16, y: u16) -> bool {
 
 pub fn draw(f: &mut Frame, app: &App, theme: &Theme) -> Regions {
     let mut regions = Regions::default();
+
+    // Terminal dégénéré (trop petit / taille nulle) : on évite tout rendu qui
+    // indexerait hors du buffer, et on invite à agrandir si la place le permet.
+    let area = f.area();
+    if area.width < 20 || area.height < 8 {
+        if area.width >= 1 && area.height >= 1 {
+            f.render_widget(
+                Paragraph::new("waveline : agrandis le terminal")
+                    .style(Style::default().fg(theme.fg)),
+                area,
+            );
+        }
+        return regions;
+    }
 
     let root = Layout::default()
         .direction(Direction::Vertical)
@@ -254,7 +268,16 @@ fn draw_playbar(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut R
         .split(inner);
 
     let pb = &app.playback;
-    let (icon, line) = match &pb.current {
+    let (icon, line) = if pb.loading {
+        (
+            "⏳",
+            Line::from(Span::styled(
+                " ⏳ Chargement…",
+                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            )),
+        )
+    } else {
+        match &pb.current {
         Some(t) => {
             let icon = if pb.playing { "▶" } else { "⏸" };
             let line = Line::from(vec![
@@ -280,6 +303,7 @@ fn draw_playbar(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut R
                 Style::default().fg(theme.dim),
             )),
         ),
+        }
     };
     let _ = icon;
     f.render_widget(Paragraph::new(line), rows[0]);
@@ -307,7 +331,26 @@ fn draw_playbar(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut R
 }
 
 fn draw_status(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let keys = "[space] play  [n/p] suiv/préc  [/] rech  [:] cmd  [tab] focus  [1·2·3] filtre  [?] aide  [q] quitter";
+    // En mode saisie : invite « : » + tampon + curseur.
+    if let Input::Command(buf) = &app.input {
+        let line = Line::from(vec![
+            Span::styled(
+                " : ",
+                Style::default().fg(theme.bg).bg(theme.accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" {buf}▏"),
+                Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  (colle une URL SoundCloud/Mixcloud · entrée pour jouer · échap pour annuler)",
+                Style::default().fg(theme.dim),
+            ),
+        ]);
+        f.render_widget(Paragraph::new(line), area);
+        return;
+    }
+    let keys = "[space] play  [n/p] suiv/préc  [:] url  [tab] focus  [1·2·3] filtre  [?] aide  [q] quitter";
     let line = Line::from(vec![
         Span::styled(format!(" {} ", app.status), Style::default().fg(theme.fg)),
         Span::styled(format!("  {keys}"), Style::default().fg(theme.dim)),
@@ -367,5 +410,64 @@ mod tests {
         assert!(contains(&r, 5, 4));
         assert!(!contains(&r, 6, 3));
         assert!(!contains(&r, 2, 5));
+    }
+
+    /// Concatène tous les symboles du buffer en une chaîne pour les assertions.
+    fn buffer_text(term: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn rend_les_zones_principales() {
+        use crate::app::App;
+        use crate::model::{Platform, Track};
+        use crate::theme::Theme;
+
+        let mut app = App::new();
+        app.tracks = vec![Track {
+            platform: Platform::SoundCloud,
+            id: "1".into(),
+            title: "Mon Morceau Test".into(),
+            artist: "Artiste Test".into(),
+            permalink: "https://soundcloud.com/a/b".into(),
+            duration_ms: Some(200_000),
+        }];
+        let theme = Theme::dark();
+
+        let backend = ratatui::backend::TestBackend::new(110, 30);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| {
+            super::draw(f, &app, &theme);
+        })
+        .unwrap();
+
+        let text = buffer_text(&term);
+        assert!(text.contains("waveline"), "titre absent");
+        assert!(text.contains("Sources"), "sidebar absente");
+        assert!(text.contains("Likes"), "section Likes absente");
+        assert!(text.contains("Mon Morceau Test"), "morceau absent");
+        assert!(text.contains("Rien en lecture"), "barre de lecture absente");
+    }
+
+    #[test]
+    fn ne_panique_pas_sur_terminal_minuscule() {
+        use crate::app::App;
+        use crate::theme::Theme;
+        let app = App::new();
+        let theme = Theme::dark();
+        for (w, h) in [(0, 0), (1, 1), (5, 3), (19, 7)] {
+            let backend = ratatui::backend::TestBackend::new(w.max(1), h.max(1));
+            let mut term = ratatui::Terminal::new(backend).unwrap();
+            // Ne doit pas paniquer même en taille dégénérée.
+            term.draw(|f| {
+                super::draw(f, &app, &theme);
+            })
+            .unwrap();
+        }
     }
 }

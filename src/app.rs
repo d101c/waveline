@@ -1,13 +1,13 @@
 //! État de l'application et logique de mise à jour (pure, testable).
 //!
-//! `App` ne fait AUCUN I/O et ne connaît ni le terminal ni le réseau : il
-//! reçoit des intentions ([`Action`]) et muta son état. Le rendu (`ui.rs`) et
-//! la boucle d'événements (`main.rs`) restent séparés — on peut tester toute
-//! la navigation sans terminal.
+//! `App` ne fait AUCUN I/O : il muta son état et renvoie d'éventuels
+//! [`Effect`] (lecture audio) que la boucle d'événements exécute sur le
+//! `Player`. La position/durée/état de lecture affichés sont resynchronisés
+//! depuis le moteur à chaque frame (cf. `main.rs`).
 
 use crate::model::{Platform, Track};
 
-/// Les sections de la barre latérale gauche.
+/// Sections de la barre latérale gauche.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     Likes,
@@ -70,13 +70,32 @@ pub enum Focus {
     List,
 }
 
-/// État de lecture courant (sera piloté par le moteur audio plus tard).
+/// Mode de saisie courant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Input {
+    Normal,
+    /// Saisie d'une URL à lire (déclenchée par `:`).
+    Command(String),
+}
+
+/// État de lecture affiché (resynchronisé depuis le moteur audio).
 #[derive(Debug, Clone, Default)]
 pub struct Playback {
     pub current: Option<Track>,
     pub playing: bool,
+    pub loading: bool,
     pub position_ms: u64,
-    pub volume: u8, // 0..=100
+    pub duration_ms: u64,
+    pub volume: u8,
+}
+
+/// Effets de bord à exécuter sur le moteur audio.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Effect {
+    Play(String),
+    Toggle,
+    Stop,
+    SetVolume(u8),
 }
 
 /// Intentions de haut niveau, indépendantes du clavier/souris.
@@ -112,6 +131,7 @@ pub struct App {
     pub list_index: usize,
     pub playback: Playback,
     pub status: String,
+    pub input: Input,
 }
 
 impl App {
@@ -128,7 +148,8 @@ impl App {
                 volume: 80,
                 ..Default::default()
             },
-            status: "Bienvenue dans waveline — appuie sur ? pour l'aide".to_string(),
+            status: "Bienvenue — ':' pour coller une URL, '?' pour l'aide".to_string(),
+            input: Input::Normal,
         }
     }
 
@@ -142,38 +163,79 @@ impl App {
             .collect()
     }
 
-    /// Le morceau actuellement surligné dans la liste, si la liste a le focus
-    /// logique d'une sélection valide.
+    /// Le morceau actuellement surligné dans la liste.
     pub fn selected_track(&self) -> Option<&Track> {
         let vis = self.visible_indices();
         vis.get(self.list_index).and_then(|&i| self.tracks.get(i))
     }
 
-    /// Applique une intention. Point d'entrée unique de la mutation d'état.
-    pub fn apply(&mut self, action: Action) {
+    fn selected_url(&self) -> Option<String> {
+        self.selected_track().map(|t| t.permalink.clone())
+    }
+
+    /// Applique une intention et renvoie l'effet audio éventuel.
+    pub fn apply(&mut self, action: Action) -> Option<Effect> {
         match action {
-            Action::Quit => self.should_quit = true,
+            Action::Quit => {
+                self.should_quit = true;
+                None
+            }
             Action::ToggleFocus => {
                 self.focus = match self.focus {
                     Focus::Sidebar => Focus::List,
                     Focus::List => Focus::Sidebar,
+                };
+                None
+            }
+            Action::FocusSidebar => {
+                self.focus = Focus::Sidebar;
+                None
+            }
+            Action::FocusList => {
+                self.focus = Focus::List;
+                None
+            }
+            Action::Up => {
+                self.move_cursor(-1);
+                None
+            }
+            Action::Down => {
+                self.move_cursor(1);
+                None
+            }
+            Action::Top => {
+                self.move_to_edge(true);
+                None
+            }
+            Action::Bottom => {
+                self.move_to_edge(false);
+                None
+            }
+            Action::Activate => self.activate(),
+            Action::PlayPause => {
+                // Rien en cours : joue la sélection. Sinon bascule.
+                if self.playback.current.is_none() && !self.playback.loading {
+                    self.selected_url().map(Effect::Play)
+                } else {
+                    Some(Effect::Toggle)
                 }
             }
-            Action::FocusSidebar => self.focus = Focus::Sidebar,
-            Action::FocusList => self.focus = Focus::List,
-            Action::Up => self.move_cursor(-1),
-            Action::Down => self.move_cursor(1),
-            Action::Top => self.move_to_edge(true),
-            Action::Bottom => self.move_to_edge(false),
-            Action::Activate => self.activate(),
-            Action::PlayPause => self.toggle_play(),
             Action::Next => self.skip(1),
             Action::Prev => self.skip(-1),
-            Action::VolumeUp => self.set_volume(self.playback.volume.saturating_add(5)),
-            Action::VolumeDown => self.set_volume(self.playback.volume.saturating_sub(5)),
-            Action::FilterAll => self.set_filter(Filter::All),
-            Action::FilterSoundCloud => self.set_filter(Filter::Only(Platform::SoundCloud)),
-            Action::FilterMixcloud => self.set_filter(Filter::Only(Platform::Mixcloud)),
+            Action::VolumeUp => Some(self.bump_volume(5)),
+            Action::VolumeDown => Some(self.bump_volume(-5)),
+            Action::FilterAll => {
+                self.set_filter(Filter::All);
+                None
+            }
+            Action::FilterSoundCloud => {
+                self.set_filter(Filter::Only(Platform::SoundCloud));
+                None
+            }
+            Action::FilterMixcloud => {
+                self.set_filter(Filter::Only(Platform::Mixcloud));
+                None
+            }
         }
     }
 
@@ -209,60 +271,86 @@ impl App {
         }
     }
 
-    fn activate(&mut self) {
+    fn activate(&mut self) -> Option<Effect> {
         match self.focus {
             Focus::Sidebar => {
                 self.focus = Focus::List;
                 self.status = format!("Section : {}", self.section.label().trim());
+                None
             }
-            Focus::List => {
-                if let Some(t) = self.selected_track().cloned() {
-                    self.play(t);
+            Focus::List => match self.selected_url() {
+                Some(url) => {
+                    self.status = "Chargement…".to_string();
+                    Some(Effect::Play(url))
                 }
-            }
+                None => None,
+            },
         }
     }
 
-    /// Démarre la lecture d'un morceau (le câblage audio réel viendra ensuite).
-    pub fn play(&mut self, t: Track) {
-        self.status = format!("▶ {} — {}", t.artist, t.title);
-        self.playback.current = Some(t);
-        self.playback.playing = true;
-        self.playback.position_ms = 0;
-    }
-
-    fn toggle_play(&mut self) {
-        if self.playback.current.is_some() {
-            self.playback.playing = !self.playback.playing;
-        } else {
-            // Rien en cours : lance la sélection courante.
-            if let Some(t) = self.selected_track().cloned() {
-                self.play(t);
-            }
-        }
-    }
-
-    fn skip(&mut self, delta: i32) {
+    fn skip(&mut self, delta: i32) -> Option<Effect> {
         let vis = self.visible_indices();
         if vis.is_empty() {
-            return;
+            return None;
         }
         let i = (self.list_index as i32 + delta).clamp(0, vis.len() as i32 - 1) as usize;
         self.list_index = i;
-        if let Some(t) = self.selected_track().cloned() {
-            self.play(t);
-        }
+        self.selected_url().map(Effect::Play)
     }
 
-    fn set_volume(&mut self, v: u8) {
-        self.playback.volume = v.min(100);
-        self.status = format!("Volume : {}%", self.playback.volume);
+    fn bump_volume(&mut self, delta: i32) -> Effect {
+        let v = (self.playback.volume as i32 + delta).clamp(0, 100) as u8;
+        self.playback.volume = v;
+        self.status = format!("Volume : {v}%");
+        Effect::SetVolume(v)
     }
 
     fn set_filter(&mut self, f: Filter) {
         self.filter = f;
         self.list_index = 0;
         self.status = format!("Filtre : {}", f.label());
+    }
+
+    // --- Mode saisie (`:` URL) ------------------------------------------------
+
+    pub fn begin_command(&mut self) {
+        self.input = Input::Command(String::new());
+    }
+
+    pub fn input_push(&mut self, c: char) {
+        if let Input::Command(s) = &mut self.input {
+            s.push(c);
+        }
+    }
+
+    pub fn input_pop(&mut self) {
+        if let Input::Command(s) = &mut self.input {
+            s.pop();
+        }
+    }
+
+    pub fn input_cancel(&mut self) {
+        self.input = Input::Normal;
+    }
+
+    /// Valide la saisie courante ; renvoie un effet de lecture si pertinent.
+    pub fn input_submit(&mut self) -> Option<Effect> {
+        let effect = if let Input::Command(s) = &self.input {
+            let url = s.trim().to_string();
+            if url.is_empty() {
+                None
+            } else if crate::providers::platform_of(&url).is_some() {
+                self.status = "Chargement…".to_string();
+                Some(Effect::Play(url))
+            } else {
+                self.status = "URL non reconnue (SoundCloud ou Mixcloud)".to_string();
+                None
+            }
+        } else {
+            None
+        };
+        self.input = Input::Normal;
+        effect
     }
 }
 
@@ -276,7 +364,7 @@ mod tests {
             id: title.into(),
             title: title.into(),
             artist: "artiste".into(),
-            permalink: "https://x".into(),
+            permalink: format!("https://soundcloud.com/x/{title}"),
             duration_ms: Some(200_000),
         }
     }
@@ -294,11 +382,11 @@ mod tests {
     #[test]
     fn navigation_liste_clampe_aux_bornes() {
         let mut a = app_with_mix();
-        a.apply(Action::Up); // déjà en haut
+        assert_eq!(a.apply(Action::Up), None);
         assert_eq!(a.list_index, 0);
         a.apply(Action::Bottom);
         assert_eq!(a.list_index, 2);
-        a.apply(Action::Down); // déjà en bas
+        a.apply(Action::Down);
         assert_eq!(a.list_index, 2);
     }
 
@@ -313,28 +401,58 @@ mod tests {
     }
 
     #[test]
-    fn activer_un_morceau_lance_la_lecture() {
+    fn activer_un_morceau_emet_play() {
         let mut a = app_with_mix();
-        a.apply(Action::Activate);
-        assert!(a.playback.playing);
-        assert_eq!(a.playback.current.unwrap().title, "sc1");
+        let eff = a.apply(Action::Activate);
+        assert_eq!(eff, Some(Effect::Play("https://soundcloud.com/x/sc1".into())));
     }
 
     #[test]
-    fn play_pause_bascule() {
+    fn play_pause_joue_la_selection_puis_bascule() {
         let mut a = app_with_mix();
-        a.apply(Action::PlayPause); // lance sc1
-        assert!(a.playback.playing);
-        a.apply(Action::PlayPause); // pause
-        assert!(!a.playback.playing);
+        // Rien en cours -> Play.
+        assert_eq!(
+            a.apply(Action::PlayPause),
+            Some(Effect::Play("https://soundcloud.com/x/sc1".into()))
+        );
+        // Simule un morceau en cours -> Toggle.
+        a.playback.current = Some(track(Platform::SoundCloud, "sc1"));
+        assert_eq!(a.apply(Action::PlayPause), Some(Effect::Toggle));
     }
 
     #[test]
-    fn volume_borne_a_100() {
+    fn volume_borne_et_emet_effet() {
         let mut a = App::new();
+        let mut last = None;
         for _ in 0..10 {
-            a.apply(Action::VolumeUp);
+            last = a.apply(Action::VolumeUp);
         }
         assert_eq!(a.playback.volume, 100);
+        assert_eq!(last, Some(Effect::SetVolume(100)));
+    }
+
+    #[test]
+    fn saisie_url_valide_emet_play() {
+        let mut a = App::new();
+        a.begin_command();
+        for c in "https://www.mixcloud.com/a/b/".chars() {
+            a.input_push(c);
+        }
+        let eff = a.input_submit();
+        assert_eq!(
+            eff,
+            Some(Effect::Play("https://www.mixcloud.com/a/b/".into()))
+        );
+        assert_eq!(a.input, Input::Normal);
+    }
+
+    #[test]
+    fn saisie_url_invalide_ne_joue_pas() {
+        let mut a = App::new();
+        a.begin_command();
+        for c in "coucou".chars() {
+            a.input_push(c);
+        }
+        assert_eq!(a.input_submit(), None);
     }
 }
