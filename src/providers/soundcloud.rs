@@ -161,6 +161,90 @@ pub fn search(
         .collect())
 }
 
+/// Résout un profil `soundcloud.com/<handle>` vers son identifiant numérique.
+pub fn resolve_user_id(agent: &ureq::Agent, handle: &str) -> Result<i64, ProviderError> {
+    let cid = client_id(agent)?;
+    let url = format!("https://soundcloud.com/{}", handle.trim_matches('/'));
+    let v: Value = agent
+        .get(&format!("{API}/resolve"))
+        .query("url", &url)
+        .query("client_id", &cid)
+        .call()
+        .map_err(HttpError::from)?
+        .into_json()
+        .map_err(|e| ProviderError::Http(HttpError::Decode(e.to_string())))?;
+    if v.get("kind").and_then(|k| k.as_str()) != Some("user") {
+        return Err(ProviderError::Unavailable(format!(
+            "« {handle} » n'est pas un profil SoundCloud"
+        )));
+    }
+    v.get("id")
+        .and_then(|i| i.as_i64())
+        .ok_or_else(|| ProviderError::Malformed("profil sans id".into()))
+}
+
+/// Likes publics d'un utilisateur (morceaux). `limit` ≤ 200.
+pub fn user_likes(agent: &ureq::Agent, handle: &str, limit: u32) -> Result<Vec<Track>, ProviderError> {
+    let id = resolve_user_id(agent, handle)?;
+    let cid = client_id(agent)?;
+    let v: Value = agent
+        .get(&format!("{API}/users/{id}/track_likes"))
+        .query("client_id", &cid)
+        .query("limit", &limit.to_string())
+        .query("linked_partitioning", "1")
+        .call()
+        .map_err(HttpError::from)?
+        .into_json()
+        .map_err(|e| ProviderError::Http(HttpError::Decode(e.to_string())))?;
+    Ok(collection_tracks(&v))
+}
+
+/// Playlists publiques d'un utilisateur, aplaties en morceaux.
+pub fn user_playlist_tracks(
+    agent: &ureq::Agent,
+    handle: &str,
+    limit: u32,
+) -> Result<Vec<Track>, ProviderError> {
+    let id = resolve_user_id(agent, handle)?;
+    let cid = client_id(agent)?;
+    let v: Value = agent
+        .get(&format!("{API}/users/{id}/playlists"))
+        .query("client_id", &cid)
+        .query("limit", &limit.to_string())
+        .query("linked_partitioning", "1")
+        .call()
+        .map_err(HttpError::from)?
+        .into_json()
+        .map_err(|e| ProviderError::Http(HttpError::Decode(e.to_string())))?;
+    let mut out = Vec::new();
+    if let Some(playlists) = v.get("collection").and_then(|c| c.as_array()) {
+        for p in playlists {
+            if let Some(tracks) = p.get("tracks").and_then(|t| t.as_array()) {
+                for t in tracks {
+                    if let Ok(track) = track_from_json(t) {
+                        out.push(track);
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Extrait les morceaux d'une collection api-v2 (items directs ou `{track:…}`).
+fn collection_tracks(v: &Value) -> Vec<Track> {
+    let Some(items) = v.get("collection").and_then(|c| c.as_array()) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|it| {
+            let t = it.get("track").unwrap_or(it);
+            track_from_json(t).ok()
+        })
+        .collect()
+}
+
 /// Résout une URL SoundCloud vers (Track, flux jouable).
 pub fn resolve(agent: &ureq::Agent, url: &str) -> Result<(Track, StreamSource), ProviderError> {
     let cid = client_id(agent)?;

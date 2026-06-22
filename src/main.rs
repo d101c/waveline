@@ -7,6 +7,7 @@
 mod app;
 mod audio;
 mod b64;
+mod config;
 mod http;
 mod model;
 mod providers;
@@ -52,6 +53,24 @@ fn main() -> io::Result<()> {
             }
             return Ok(());
         }
+        Some("lib") => {
+            // waveline lib <likes|playlists|feed> <sc_handle|-> <mc_handle|->
+            use providers::LibrarySection::*;
+            let sec = match args.get(2).map(|s| s.as_str()) {
+                Some("playlists") => Playlists,
+                Some("feed") => Feed,
+                _ => Likes,
+            };
+            let sc = args.get(3).filter(|s| s.as_str() != "-").map(|s| s.as_str());
+            let mc = args.get(4).filter(|s| s.as_str() != "-").map(|s| s.as_str());
+            let agent = http::agent();
+            let tracks = providers::library(&agent, sc, mc, sec);
+            println!("{} morceaux", tracks.len());
+            for t in tracks.iter().take(20) {
+                println!("[{}] {} — {} ({})", t.platform.tag(), t.artist, t.title, t.duration_human());
+            }
+            return Ok(());
+        }
         _ => {}
     }
 
@@ -71,6 +90,11 @@ fn run(terminal: &mut Tui, app: &mut App, theme: &Theme) -> io::Result<()> {
     let mut regions = Regions::default();
     let mut last_finished = player.shared().finished_generation.load(Ordering::Relaxed);
     let mut search_rx: Option<std::sync::mpsc::Receiver<Vec<Track>>> = None;
+
+    // Comptes connectés (pseudos publics) chargés depuis la config.
+    let mut config = config::Config::load();
+    app.sc_handle = config.soundcloud.clone();
+    app.mc_handle = config.mixcloud.clone();
 
     while !app.should_quit {
         sync_playback(app, &player);
@@ -116,6 +140,18 @@ fn run(terminal: &mut Tui, app: &mut App, theme: &Theme) -> io::Result<()> {
             if let Some(eff) = effect {
                 match eff {
                     Effect::Search(q) => search_rx = Some(spawn_search(q)),
+                    Effect::LoadLibrary(sec) => {
+                        search_rx = Some(spawn_library(
+                            app.sc_handle.clone(),
+                            app.mc_handle.clone(),
+                            sec,
+                        ));
+                    }
+                    Effect::SaveAccounts => {
+                        config.soundcloud = app.sc_handle.clone();
+                        config.mixcloud = app.mc_handle.clone();
+                        config.save();
+                    }
                     other => exec(&player, other),
                 }
             }
@@ -135,6 +171,21 @@ fn spawn_search(query: String) -> std::sync::mpsc::Receiver<Vec<Track>> {
     rx
 }
 
+/// Charge une section de bibliothèque dans un thread (données publiques).
+fn spawn_library(
+    sc: Option<String>,
+    mc: Option<String>,
+    section: providers::LibrarySection,
+) -> std::sync::mpsc::Receiver<Vec<Track>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let agent = http::agent();
+        let results = providers::library(&agent, sc.as_deref(), mc.as_deref(), section);
+        let _ = tx.send(results);
+    });
+    rx
+}
+
 /// Exécute un effet sur le moteur audio.
 fn exec(player: &Player, effect: Effect) {
     match effect {
@@ -142,8 +193,8 @@ fn exec(player: &Player, effect: Effect) {
         Effect::Toggle => player.toggle(),
         Effect::Stop => player.stop(),
         Effect::SetVolume(v) => player.set_volume(v),
-        // La recherche est interceptée en amont (lance un thread) ; jamais ici.
-        Effect::Search(_) => {}
+        // Recherche / bibliothèque / sauvegarde sont gérées en amont, jamais ici.
+        Effect::Search(_) | Effect::LoadLibrary(_) | Effect::SaveAccounts => {}
     }
 }
 
@@ -226,9 +277,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<Effect> {
             app.begin_search();
             None
         }
+        KeyCode::Char('c') => {
+            app.begin_connect();
+            None
+        }
         KeyCode::Char('?') => {
             app.status =
-                "Aide : ':' URL · j/k naviguer · enter/clic jouer · space pause · n/p · 1/2/3 filtre · q quitter".into();
+                "Aide : 'c' comptes · ':' URL · '/' rech · j/k naviguer · enter/clic jouer · space pause · n/p · s stop · 1/2/3 filtre · q quitter".into();
             None
         }
         _ => None,

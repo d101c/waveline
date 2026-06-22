@@ -133,6 +133,52 @@ fn interleave(a: Vec<Track>, b: Vec<Track>) -> Vec<Track> {
     out
 }
 
+/// Section de bibliothèque liée à un compte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibrarySection {
+    Likes,
+    Playlists,
+    Feed,
+}
+
+/// Charge une section de la bibliothèque de l'utilisateur (données publiques),
+/// en fusionnant SoundCloud et Mixcloud. Best-effort : une plateforme en échec
+/// ou non configurée n'empêche pas l'autre.
+pub fn library(
+    agent: &ureq::Agent,
+    sc_handle: Option<&str>,
+    mc_handle: Option<&str>,
+    section: LibrarySection,
+) -> Vec<Track> {
+    let (mut sc, mut mc) = (Vec::new(), Vec::new());
+    match section {
+        LibrarySection::Likes => {
+            if let Some(h) = sc_handle {
+                sc = soundcloud::user_likes(agent, h, 50).unwrap_or_default();
+            }
+            if let Some(h) = mc_handle {
+                mc = mixcloud::user_favorites(agent, h, 50).unwrap_or_default();
+            }
+        }
+        LibrarySection::Playlists => {
+            if let Some(h) = sc_handle {
+                sc = soundcloud::user_playlist_tracks(agent, h, 20).unwrap_or_default();
+            }
+            if let Some(h) = mc_handle {
+                mc = mixcloud::user_playlist_tracks(agent, h, 5).unwrap_or_default();
+            }
+        }
+        LibrarySection::Feed => {
+            // Le fil SoundCloud exige OAuth : on utilise l'historique d'écoutes
+            // Mixcloud comme « fil » côté public.
+            if let Some(h) = mc_handle {
+                mc = mixcloud::user_listens(agent, h, 50).unwrap_or_default();
+            }
+        }
+    }
+    interleave(sc, mc)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

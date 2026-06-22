@@ -78,13 +78,20 @@ pub enum Input {
     Command(String),
     /// Saisie d'une requête de recherche (déclenchée par `/`).
     Search(String),
+    /// Saisie du pseudo SoundCloud (connexion compte).
+    ConnectSoundCloud(String),
+    /// Saisie du pseudo Mixcloud (connexion compte).
+    ConnectMixcloud(String),
 }
 
 impl Input {
     /// Tampon de saisie mutable, quel que soit le mode actif.
     fn buffer_mut(&mut self) -> Option<&mut String> {
         match self {
-            Input::Command(s) | Input::Search(s) => Some(s),
+            Input::Command(s)
+            | Input::Search(s)
+            | Input::ConnectSoundCloud(s)
+            | Input::ConnectMixcloud(s) => Some(s),
             Input::Normal => None,
         }
     }
@@ -103,7 +110,7 @@ pub struct Playback {
     pub spectrum: Vec<f32>,
 }
 
-/// Effets de bord à exécuter sur le moteur audio.
+/// Effets de bord exécutés par la boucle principale (audio, réseau, disque).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     Play(String),
@@ -111,6 +118,10 @@ pub enum Effect {
     Stop,
     SetVolume(u8),
     Search(String),
+    /// Charge une section de bibliothèque depuis les comptes configurés.
+    LoadLibrary(crate::providers::LibrarySection),
+    /// Persiste les pseudos de compte sur disque.
+    SaveAccounts,
 }
 
 /// Intentions de haut niveau, indépendantes du clavier/souris.
@@ -147,6 +158,10 @@ pub struct App {
     pub playback: Playback,
     pub status: String,
     pub input: Input,
+    /// Pseudo SoundCloud connecté (compte de l'utilisateur).
+    pub sc_handle: Option<String>,
+    /// Pseudo Mixcloud connecté.
+    pub mc_handle: Option<String>,
 }
 
 impl App {
@@ -163,9 +178,17 @@ impl App {
                 volume: 80,
                 ..Default::default()
             },
-            status: "Bienvenue — ':' pour coller une URL, '?' pour l'aide".to_string(),
+            status: "Bienvenue — 'c' connecter un compte · ':' URL · '/' recherche · '?' aide"
+                .to_string(),
             input: Input::Normal,
+            sc_handle: None,
+            mc_handle: None,
         }
+    }
+
+    /// Indique si au moins un compte est connecté.
+    pub fn has_account(&self) -> bool {
+        self.sc_handle.is_some() || self.mc_handle.is_some()
     }
 
     /// Indices des morceaux visibles après application du filtre courant.
@@ -288,11 +311,7 @@ impl App {
 
     fn activate(&mut self) -> Option<Effect> {
         match self.focus {
-            Focus::Sidebar => {
-                self.focus = Focus::List;
-                self.status = format!("Section : {}", self.section.label().trim());
-                None
-            }
+            Focus::Sidebar => self.open_section(),
             Focus::List => match self.selected_url() {
                 Some(url) => {
                     self.status = "Chargement…".to_string();
@@ -300,6 +319,37 @@ impl App {
                 }
                 None => None,
             },
+        }
+    }
+
+    /// Ouvre la section sélectionnée dans la sidebar.
+    fn open_section(&mut self) -> Option<Effect> {
+        use crate::providers::LibrarySection;
+        self.focus = Focus::List;
+        let lib = match self.section {
+            Section::Likes => Some(LibrarySection::Likes),
+            Section::Playlists => Some(LibrarySection::Playlists),
+            Section::Feed => Some(LibrarySection::Feed),
+            Section::Search => {
+                self.begin_search();
+                return None;
+            }
+            Section::History | Section::Queue => {
+                self.status = format!("{} — bientôt", self.section.label().trim());
+                return None;
+            }
+        };
+        match lib {
+            Some(sec) if self.has_account() => {
+                self.status = format!("Chargement de {}…", self.section.label().trim());
+                Some(Effect::LoadLibrary(sec))
+            }
+            Some(_) => {
+                self.status =
+                    "Aucun compte connecté — appuie sur 'c' pour entrer tes pseudos".to_string();
+                None
+            }
+            None => None,
         }
     }
 
@@ -336,6 +386,11 @@ impl App {
         self.input = Input::Search(String::new());
     }
 
+    /// Démarre la connexion : pseudo SoundCloud, puis Mixcloud (pré-remplis).
+    pub fn begin_connect(&mut self) {
+        self.input = Input::ConnectSoundCloud(self.sc_handle.clone().unwrap_or_default());
+    }
+
     pub fn input_push(&mut self, c: char) {
         if let Some(s) = self.input.buffer_mut() {
             s.push(c);
@@ -355,7 +410,9 @@ impl App {
     /// Valide la saisie courante ; renvoie l'effet correspondant (lecture d'URL
     /// ou recherche), ou `None` si la saisie est vide/invalide.
     pub fn input_submit(&mut self) -> Option<Effect> {
-        let effect = match &self.input {
+        // On reprend la saisie et on repasse en Normal par défaut ; le mode de
+        // connexion SoundCloud réarme ensuite la saisie Mixcloud.
+        match std::mem::replace(&mut self.input, Input::Normal) {
             Input::Command(s) => {
                 let url = s.trim().to_string();
                 if url.is_empty() {
@@ -377,10 +434,23 @@ impl App {
                     Some(Effect::Search(q))
                 }
             }
+            Input::ConnectSoundCloud(s) => {
+                self.sc_handle = crate::config::normalize_handle(&s);
+                // Enchaîne sur le pseudo Mixcloud (pré-rempli).
+                self.input = Input::ConnectMixcloud(self.mc_handle.clone().unwrap_or_default());
+                None
+            }
+            Input::ConnectMixcloud(s) => {
+                self.mc_handle = crate::config::normalize_handle(&s);
+                self.status = format!(
+                    "Comptes — SoundCloud : {} · Mixcloud : {}  (ouvre Likes/Playlists/Feed)",
+                    self.sc_handle.as_deref().unwrap_or("—"),
+                    self.mc_handle.as_deref().unwrap_or("—"),
+                );
+                Some(Effect::SaveAccounts)
+            }
             Input::Normal => None,
-        };
-        self.input = Input::Normal;
-        effect
+        }
     }
 
     /// Remplace la liste par des résultats de recherche.

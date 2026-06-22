@@ -168,6 +168,30 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut R
         f.render_widget(Paragraph::new(Span::styled(label, style)), row);
         reg.sidebar_rows.push(row);
     }
+
+    // Comptes connectés, en bas de la sidebar (non cliquables).
+    if inner.height >= 4 {
+        let base = inner.y + inner.height - 3;
+        let sc = app.sc_handle.as_deref().unwrap_or("—");
+        let mc = app.mc_handle.as_deref().unwrap_or("—");
+        let lines = [
+            Span::styled(
+                " comptes  (c)",
+                Style::default().fg(theme.dim).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!(" SC {sc}"), Style::default().fg(theme.soundcloud)),
+            Span::styled(format!(" MC {mc}"), Style::default().fg(theme.mixcloud)),
+        ];
+        for (k, span) in lines.into_iter().enumerate() {
+            let y = base + k as u16;
+            if y < inner.y + inner.height {
+                f.render_widget(
+                    Paragraph::new(span),
+                    Rect::new(inner.x, y, inner.width, 1),
+                );
+            }
+        }
+    }
 }
 
 fn draw_list(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut Regions) {
@@ -388,6 +412,16 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             "/",
             buf,
             "tape ta recherche · entrée pour chercher · échap pour annuler",
+        )),
+        Input::ConnectSoundCloud(buf) => Some((
+            "SoundCloud",
+            buf,
+            "ton pseudo SoundCloud (vide = aucun) · entrée → Mixcloud · échap annule",
+        )),
+        Input::ConnectMixcloud(buf) => Some((
+            "Mixcloud",
+            buf,
+            "ton pseudo Mixcloud (vide = aucun) · entrée pour valider · échap annule",
         )),
         Input::Normal => None,
     };

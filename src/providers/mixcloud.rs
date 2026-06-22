@@ -52,6 +52,76 @@ fn track_from_rest(c: &Value) -> Option<Track> {
     })
 }
 
+/// Liste de cloudcasts publique d'un utilisateur (`favorites`, `listens`, …).
+fn user_list(
+    agent: &ureq::Agent,
+    handle: &str,
+    kind: &str,
+    limit: u32,
+) -> Result<Vec<Track>, ProviderError> {
+    let h = handle.trim_matches('/');
+    let v: Value = agent
+        .get(&format!("{REST}/{h}/{kind}/"))
+        .query("limit", &limit.to_string())
+        .call()
+        .map_err(HttpError::from)?
+        .into_json()
+        .map_err(|e| ProviderError::Http(HttpError::Decode(e.to_string())))?;
+    let items = v.get("data").and_then(|d| d.as_array());
+    Ok(items
+        .map(|arr| arr.iter().filter_map(track_from_rest).collect())
+        .unwrap_or_default())
+}
+
+/// Favoris publics.
+pub fn user_favorites(agent: &ureq::Agent, handle: &str, limit: u32) -> Result<Vec<Track>, ProviderError> {
+    user_list(agent, handle, "favorites", limit)
+}
+
+/// Historique d'écoutes public.
+pub fn user_listens(agent: &ureq::Agent, handle: &str, limit: u32) -> Result<Vec<Track>, ProviderError> {
+    user_list(agent, handle, "listens", limit)
+}
+
+/// Playlists publiques, aplaties en morceaux (plafonné à quelques playlists).
+pub fn user_playlist_tracks(
+    agent: &ureq::Agent,
+    handle: &str,
+    max_playlists: usize,
+) -> Result<Vec<Track>, ProviderError> {
+    let h = handle.trim_matches('/');
+    let v: Value = agent
+        .get(&format!("{REST}/{h}/playlists/"))
+        .query("limit", "20")
+        .call()
+        .map_err(HttpError::from)?
+        .into_json()
+        .map_err(|e| ProviderError::Http(HttpError::Decode(e.to_string())))?;
+    let mut out = Vec::new();
+    if let Some(playlists) = v.get("data").and_then(|d| d.as_array()) {
+        for p in playlists.iter().take(max_playlists) {
+            let Some(slug) = p.get("slug").and_then(|s| s.as_str()) else {
+                continue;
+            };
+            let cc: Value = match agent
+                .get(&format!("{REST}/{h}/playlists/{slug}/cloudcasts/"))
+                .query("limit", "50")
+                .call()
+            {
+                Ok(r) => match r.into_json() {
+                    Ok(j) => j,
+                    Err(_) => continue,
+                },
+                Err(_) => continue,
+            };
+            if let Some(arr) = cc.get("data").and_then(|d| d.as_array()) {
+                out.extend(arr.iter().filter_map(track_from_rest));
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Clé XOR (en clair) appliquée après décodage base64 des URLs de flux.
 const KEY: &[u8] = b"IFYOUWANTTHEARTISTSTOGETPAIDDONOTDOWNLOADFROMMIXCLOUD";
 

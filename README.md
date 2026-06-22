@@ -33,9 +33,12 @@ chercher, et écouter les deux au même endroit, à la souris **ou** au clavier.
   via PipeWire (`pw-play`) ou ALSA (`aplay`). Aucun lecteur externe requis.
 - **Cliquable ET clavier** — clic sur une piste pour jouer, clic sur les onglets
   de filtre, la barre play/pause ; ou tout au clavier en style vim.
-- **Avec et sans compte** — utilisable immédiatement sans login (URLs publiques
-  + recherche) ; l'accès à *tes* likes/playlists arrive (voir
-  [roadmap](#roadmap)).
+- **Analyseur de spectre intégré** — barres par bandes en temps réel sous la
+  barre de lecture (FFT maison, calcul throttlé → coût CPU négligeable).
+- **Avec et sans compte** — sans login : URLs publiques + recherche. Avec
+  compte : saisis ton **pseudo** SoundCloud/Mixcloud (touche `c`) et tes
+  **Likes / Playlists / Feed** se remplissent depuis les données publiques —
+  aucun OAuth, aucun token, rien de sensible stocké.
 - **Autonome, peu de dépendances** — un binaire, HTTP pur-Rust (`ureq`+rustls),
   pas de `tokio`, pas d'OpenSSL système, pas de `yt-dlp`.
 
@@ -59,17 +62,27 @@ Lance `waveline`, puis :
 |---|---|---|---|---|
 | `j` / `k` ou `↑`/`↓` | naviguer | | `/` | rechercher (SC + MC) |
 | `Entrée` / clic | jouer la sélection | | `:` | coller une URL et jouer |
-| `Espace` | play / pause | | `1` `2` `3` | filtre Tout / SC / MC |
-| `n` / `p` | suivant / précédent | | `Tab` | changer de panneau |
+| `Espace` | play / pause | | `c` | connecter tes comptes |
+| `n` / `p` | suivant / précédent | | `1` `2` `3` | filtre Tout / SC / MC |
+| `s` | stop | | `Tab` | changer de panneau |
 | `+` / `-` | volume | | `q` | quitter |
 | `g` / `G` | haut / bas de liste | | `?` | aide |
+
+### Connexion à tes comptes
+
+Appuie sur `c`, entre ton **pseudo SoundCloud** (Entrée), puis ton **pseudo
+Mixcloud** (Entrée). Les pseudos sont mémorisés dans
+`~/.config/waveline/config.json`. Active ensuite **Likes**, **Playlists** ou
+**Feed** dans la barre latérale : tes données publiques des deux plateformes y
+sont fusionnées. Aucun mot de passe ni token — uniquement des pseudos publics.
 
 ### Modes ligne de commande (debug)
 
 ```sh
-waveline resolve <url>        # affiche le flux résolu d'une URL
-waveline play <url> [secondes] # joue le flux N secondes (test moteur)
-waveline search <requête>      # recherche unifiée SC + MC
+waveline resolve <url>          # affiche le flux résolu d'une URL
+waveline play <url> [secondes]  # joue le flux N secondes (test moteur)
+waveline search <requête>       # recherche unifiée SC + MC
+waveline lib <likes|playlists|feed> <pseudo_sc|-> <pseudo_mc|->
 ```
 
 ## Architecture
@@ -87,7 +100,9 @@ src/
 ├── audio/          moteur de lecture
 │   ├── player.rs   thread worker : résolution → décodage → sink
 │   ├── source.rs   sources HTTP progressif / HLS pour symphonia
-│   └── sink.rs     sortie PCM via pw-play / aplay
+│   ├── sink.rs     sortie PCM via pw-play / aplay
+│   └── spectrum.rs FFT radix-2 maison + bandes (analyseur)
+├── config.rs       pseudos de compte (~/.config/waveline)
 ├── http.rs         agent ureq partagé (UA navigateur)
 └── b64.rs          décodeur base64 (pour le XOR Mixcloud)
 ```
@@ -109,7 +124,9 @@ chaque frame. Ce découpage rend toute la navigation testable sans terminal.
 
 ## Roadmap
 
-- [ ] Mode **avec compte** : OAuth + accès à tes likes / playlists / abonnements.
+- [x] Mode **avec compte** par pseudo public (Likes / Playlists / Feed).
+- [x] Analyseur de spectre intégré.
+- [ ] Likes *privés* SoundCloud via `oauth_token` collé (optionnel, hors CGU).
 - [ ] File d'attente persistante et historique.
 - [ ] Palette de commandes (`Ctrl-P`) et thèmes.
 - [ ] HLS chiffré AES-128 (non-DRM) et préchargement gapless.
