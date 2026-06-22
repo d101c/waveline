@@ -1,0 +1,41 @@
+{
+  "name": "waveline",
+  "version": "0.1.0",
+  "description": "TUI unifiée pour écouter Mixcloud & SoundCloud depuis la console : un seul endroit, cliquable, raccourcis vim, analyseur de spectre, touches média.",
+  "bin": {
+    "waveline": "bin/waveline.js"
+  },
+  "files": [
+    "bin/"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/d101c/waveline.git"
+  },
+  "homepage": "https://github.com/d101c/waveline",
+  "bugs": "https://github.com/d101c/waveline/issues",
+  "keywords": [
+    "tui",
+    "terminal",
+    "soundcloud",
+    "mixcloud",
+    "music",
+    "player",
+    "cli",
+    "ratatui",
+    "mpris",
+    "spectrum"
+  ],
+  "license": "MIT",
+  "author": "d101c",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=14"
+  }
+}

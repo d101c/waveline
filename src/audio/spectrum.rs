@@ -89,7 +89,7 @@ pub fn compute_bands(samples: &[f32]) -> [f32; BANDS] {
 
     let half = n / 2;
     let mut bands = [0.0f32; BANDS];
-    for b in 0..BANDS {
+    for (b, slot) in bands.iter_mut().enumerate() {
         let lo = band_edge(b, half).max(1);
         let hi = band_edge(b + 1, half).max(lo + 1).min(half);
         let mut peak = 0.0f32;
@@ -101,7 +101,7 @@ pub fn compute_bands(samples: &[f32]) -> [f32; BANDS] {
         }
         // Compression log : ~ dB normalisé. Constante réglée pour la musique.
         let v = (1.0 + peak).ln() / 7.0;
-        bands[b] = v.clamp(0.0, 1.0);
+        *slot = v.clamp(0.0, 1.0);
     }
     bands
 }
@@ -140,7 +140,10 @@ mod tests {
             .unwrap()
             .0;
         // bin 200 sur 512 → partie haute du spectre.
-        assert!(argmax > BANDS / 2, "pic attendu dans les aigus, eu {argmax}");
+        assert!(
+            argmax > BANDS / 2,
+            "pic attendu dans les aigus, eu {argmax}"
+        );
         // Toutes les valeurs restent normalisées.
         assert!(bands.iter().all(|&v| (0.0..=1.0).contains(&v)));
     }

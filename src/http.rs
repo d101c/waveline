@@ -41,9 +41,7 @@ impl std::error::Error for HttpError {}
 impl From<ureq::Error> for HttpError {
     fn from(e: ureq::Error) -> Self {
         match e {
-            ureq::Error::Status(code, resp) => {
-                HttpError::Status(code, resp.get_url().to_string())
-            }
+            ureq::Error::Status(code, resp) => HttpError::Status(code, resp.get_url().to_string()),
             ureq::Error::Transport(t) => HttpError::Transport(t.to_string()),
         }
     }

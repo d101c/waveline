@@ -96,10 +96,7 @@ pub fn platform_of(url: &str) -> Option<Platform> {
 }
 
 /// Résout une URL publique vers (métadonnées, flux jouable), toute plateforme.
-pub fn resolve_url(
-    agent: &ureq::Agent,
-    url: &str,
-) -> Result<(Track, StreamSource), ProviderError> {
+pub fn resolve_url(agent: &ureq::Agent, url: &str) -> Result<(Track, StreamSource), ProviderError> {
     match platform_of(url) {
         Some(Platform::SoundCloud) => soundcloud::resolve(agent, url),
         Some(Platform::Mixcloud) => mixcloud::resolve(agent, url),
@@ -193,7 +190,10 @@ mod tests {
             permalink: "u".into(),
             duration_ms: None,
         };
-        let a = vec![mk(Platform::SoundCloud, "s1"), mk(Platform::SoundCloud, "s2")];
+        let a = vec![
+            mk(Platform::SoundCloud, "s1"),
+            mk(Platform::SoundCloud, "s2"),
+        ];
         let b = vec![mk(Platform::Mixcloud, "m1")];
         let r = interleave(a, b);
         let titles: Vec<_> = r.iter().map(|t| t.title.as_str()).collect();

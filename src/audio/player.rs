@@ -184,8 +184,7 @@ fn play_one(
     url: &str,
 ) -> Result<bool, String> {
     // 1. Résolution réseau (peut échouer proprement).
-    let (track, source) =
-        providers::resolve_url(agent, url).map_err(|e| e.to_string())?;
+    let (track, source) = providers::resolve_url(agent, url).map_err(|e| e.to_string())?;
     let duration = track.duration_ms.unwrap_or(0);
     shared.duration_ms.store(duration, Ordering::Relaxed);
     shared.position_ms.store(0, Ordering::Relaxed);
@@ -268,7 +267,11 @@ fn decode_loop(
     loop {
         // --- Traite les commandes en attente (non bloquant en lecture) ---
         loop {
-            let cmd = if paused { rx.recv().ok() } else { rx.try_recv().ok() };
+            let cmd = if paused {
+                rx.recv().ok()
+            } else {
+                rx.try_recv().ok()
+            };
             match cmd {
                 Some(Command::Pause) => {
                     paused = true;

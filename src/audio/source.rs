@@ -46,7 +46,7 @@ impl HttpStream {
             .get(&self.url)
             .set("Range", &format!("bytes={}-", self.pos))
             .call()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
         let partial = resp.status() == 206;
         let mut reader = resp.into_reader();
         // Si le serveur ignore Range (200 au lieu de 206), on saute `pos` octets.
@@ -74,9 +74,9 @@ impl Seek for HttpStream {
         let target = match pos {
             SeekFrom::Start(p) => p,
             SeekFrom::End(off) => {
-                let len = self
-                    .len
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "longueur inconnue"))?;
+                let len = self.len.ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::Unsupported, "longueur inconnue")
+                })?;
                 (len as i64 + off).max(0) as u64
             }
             SeekFrom::Current(off) => (self.pos as i64 + off).max(0) as u64,
@@ -127,7 +127,7 @@ impl HlsReader {
             .agent
             .get(url)
             .call()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
         self.current = Some(resp.into_reader());
         Ok(true)
     }

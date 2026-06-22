@@ -39,7 +39,6 @@ impl Config {
             }
         }
     }
-
 }
 
 /// Normalise une saisie de pseudo : vide → `None`, sinon nettoie l'URL/espaces.

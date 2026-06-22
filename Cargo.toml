@@ -2,13 +2,24 @@
 name = "waveline"
 version = "0.1.0"
 edition = "2021"
-description = "TUI unifiée pour écouter Mixcloud & SoundCloud depuis la console — binaire Rust autonome, cliquable, raccourcis vim"
+description = "TUI unifiée pour écouter Mixcloud & SoundCloud depuis la console — cliquable, raccourcis vim, analyseur de spectre, touches média (MPRIS)"
 license = "MIT"
 repository = "https://github.com/d101c/waveline"
+homepage = "https://github.com/d101c/waveline"
+readme = "README.md"
+keywords = ["tui", "soundcloud", "mixcloud", "music", "player"]
+categories = ["multimedia::audio", "command-line-utilities"]
+exclude = ["npm/", "assets/", "docs/", ".github/"]
 
 [[bin]]
 name = "waveline"
 path = "src/main.rs"
+
+# Permet `cargo binstall waveline` : récupère l'archive de la Release GitHub.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "{ bin }"
 
 [dependencies]
 # TUI cliquable (souris + clavier)

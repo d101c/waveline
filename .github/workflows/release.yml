@@ -1,0 +1,36 @@
+name: release
+
+# Sur un tag vX.Y.Z : compile des binaires Linux statiques (musl) et les
+# attache à la Release GitHub. Ces archives sont la source des installeurs
+# (npx waveline, cargo-binstall, scripts d'install).
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  upload-binaries:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build & upload
+        uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: waveline
+          target: ${{ matrix.target }}
+          # Nom d'archive attendu par les installeurs : waveline-<target>.tar.gz
+          archive: $bin-$target
+          tar: all
+          checksum: sha256
+          token: ${{ secrets.GITHUB_TOKEN }}

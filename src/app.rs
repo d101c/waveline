@@ -561,7 +561,10 @@ mod tests {
     fn activer_un_morceau_emet_play() {
         let mut a = app_with_mix();
         let eff = a.apply(Action::Activate);
-        assert_eq!(eff, Some(Effect::Play("https://soundcloud.com/x/sc1".into())));
+        assert_eq!(
+            eff,
+            Some(Effect::Play("https://soundcloud.com/x/sc1".into()))
+        );
     }
 
     #[test]

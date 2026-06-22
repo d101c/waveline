@@ -11,11 +11,7 @@ const GRAPHQL: &str = "https://www.mixcloud.com/graphql";
 const REST: &str = "https://api.mixcloud.com";
 
 /// Recherche de cloudcasts (mode public, sans compte) via l'API REST.
-pub fn search(
-    agent: &ureq::Agent,
-    query: &str,
-    limit: u32,
-) -> Result<Vec<Track>, ProviderError> {
+pub fn search(agent: &ureq::Agent, query: &str, limit: u32) -> Result<Vec<Track>, ProviderError> {
     let v: Value = agent
         .get(&format!("{REST}/search/"))
         .query("q", query)
@@ -41,7 +37,10 @@ fn track_from_rest(c: &Value) -> Option<Track> {
         .and_then(|n| n.as_str())
         .unwrap_or("Inconnu")
         .to_string();
-    let duration_ms = c.get("audio_length").and_then(|d| d.as_u64()).map(|s| s * 1000);
+    let duration_ms = c
+        .get("audio_length")
+        .and_then(|d| d.as_u64())
+        .map(|s| s * 1000);
     Some(Track {
         platform: Platform::Mixcloud,
         id: key.to_string(),
@@ -74,12 +73,20 @@ fn user_list(
 }
 
 /// Favoris publics.
-pub fn user_favorites(agent: &ureq::Agent, handle: &str, limit: u32) -> Result<Vec<Track>, ProviderError> {
+pub fn user_favorites(
+    agent: &ureq::Agent,
+    handle: &str,
+    limit: u32,
+) -> Result<Vec<Track>, ProviderError> {
     user_list(agent, handle, "favorites", limit)
 }
 
 /// Historique d'écoutes public.
-pub fn user_listens(agent: &ureq::Agent, handle: &str, limit: u32) -> Result<Vec<Track>, ProviderError> {
+pub fn user_listens(
+    agent: &ureq::Agent,
+    handle: &str,
+    limit: u32,
+) -> Result<Vec<Track>, ProviderError> {
     user_list(agent, handle, "listens", limit)
 }
 
@@ -151,13 +158,15 @@ pub fn parse_url(url: &str) -> Option<(String, String)> {
 }
 
 fn container_from_url(url: &str) -> Container {
-    let u = url.split(['?', '#']).next().unwrap_or(url).to_ascii_lowercase();
+    let u = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .to_ascii_lowercase();
+    // Mixcloud sert du MP3 progressif rarement ; le reste (m4a/mp4, segments
+    // HLS .m3u8) est de l'AAC en conteneur MP4.
     if u.ends_with(".mp3") {
         Container::Mp3
-    } else if u.ends_with(".m4a") || u.ends_with(".mp4") {
-        Container::Mp4
-    } else if u.contains(".m3u8") {
-        Container::Mp4 // segments HLS Mixcloud = AAC
     } else {
         Container::Mp4
     }
@@ -165,8 +174,7 @@ fn container_from_url(url: &str) -> Container {
 
 /// Résout une URL Mixcloud vers (Track, flux jouable), en un seul appel GraphQL.
 pub fn resolve(agent: &ureq::Agent, url: &str) -> Result<(Track, StreamSource), ProviderError> {
-    let (user, slug) = parse_url(url)
-        .ok_or_else(|| ProviderError::Unsupported(url.to_string()))?;
+    let (user, slug) = parse_url(url).ok_or_else(|| ProviderError::Unsupported(url.to_string()))?;
     let cc = query_cloudcast(agent, &user, &slug)?;
     if let Some(reason) = cc.get("restrictedReason").and_then(|r| r.as_str()) {
         return Err(ProviderError::Unavailable(format!(
@@ -213,7 +221,10 @@ fn track_from_cc(cc: &Value, user: &str, slug: &str) -> Track {
         .and_then(|n| n.as_str())
         .unwrap_or(user)
         .to_string();
-    let duration_ms = cc.get("audioLength").and_then(|d| d.as_u64()).map(|s| s * 1000);
+    let duration_ms = cc
+        .get("audioLength")
+        .and_then(|d| d.as_u64())
+        .map(|s| s * 1000);
     Track {
         platform: Platform::Mixcloud,
         id: format!("{user}/{slug}"),
@@ -234,7 +245,11 @@ fn stream_from_cc(agent: &ureq::Agent, cc: &Value) -> Result<StreamSource, Provi
         })?;
 
     // Préférence : url (progressif) > hlsUrl.
-    if let Some(enc) = si.get("url").and_then(|u| u.as_str()).filter(|s| !s.is_empty()) {
+    if let Some(enc) = si
+        .get("url")
+        .and_then(|u| u.as_str())
+        .filter(|s| !s.is_empty())
+    {
         if let Some(dec) = decrypt(enc) {
             return Ok(StreamSource {
                 container: container_from_url(&dec),
@@ -242,7 +257,11 @@ fn stream_from_cc(agent: &ureq::Agent, cc: &Value) -> Result<StreamSource, Provi
             });
         }
     }
-    if let Some(enc) = si.get("hlsUrl").and_then(|u| u.as_str()).filter(|s| !s.is_empty()) {
+    if let Some(enc) = si
+        .get("hlsUrl")
+        .and_then(|u| u.as_str())
+        .filter(|s| !s.is_empty())
+    {
         if let Some(dec) = decrypt(enc) {
             let segments = expand_hls(agent, &dec)?;
             return Ok(StreamSource {
@@ -298,10 +317,17 @@ mod tests {
     fn xor_est_symetrique_et_reversible() {
         // Chiffre "https://x" puis vérifie le round-trip via base64+xor.
         let plain = b"https://stream.example/seg.m4a";
-        let enc: Vec<u8> = plain.iter().zip(KEY.iter().cycle()).map(|(b, k)| b ^ k).collect();
+        let enc: Vec<u8> = plain
+            .iter()
+            .zip(KEY.iter().cycle())
+            .map(|(b, k)| b ^ k)
+            .collect();
         // encode base64 standard "à la main" pour le test
         let b64 = base64_encode(&enc);
-        assert_eq!(decrypt(&b64).as_deref(), Some(std::str::from_utf8(plain).unwrap()));
+        assert_eq!(
+            decrypt(&b64).as_deref(),
+            Some(std::str::from_utf8(plain).unwrap())
+        );
     }
 
     #[test]

@@ -46,13 +46,22 @@ fn main() -> io::Result<()> {
     match args.get(1).map(|s| s.as_str()) {
         Some("resolve") => return debug_resolve(args.get(2).map(|s| s.as_str())),
         Some("play") => {
-            return debug_play(args.get(2).map(|s| s.as_str()), args.get(3).map(|s| s.as_str()))
+            return debug_play(
+                args.get(2).map(|s| s.as_str()),
+                args.get(3).map(|s| s.as_str()),
+            )
         }
         Some("search") => {
             let q = args[2..].join(" ");
             let agent = http::agent();
             for t in providers::search_all(&agent, &q, 8) {
-                println!("[{}] {} — {} ({})", t.platform.tag(), t.artist, t.title, t.duration_human());
+                println!(
+                    "[{}] {} — {} ({})",
+                    t.platform.tag(),
+                    t.artist,
+                    t.title,
+                    t.duration_human()
+                );
             }
             return Ok(());
         }
@@ -64,13 +73,25 @@ fn main() -> io::Result<()> {
                 Some("feed") => Feed,
                 _ => Likes,
             };
-            let sc = args.get(3).filter(|s| s.as_str() != "-").map(|s| s.as_str());
-            let mc = args.get(4).filter(|s| s.as_str() != "-").map(|s| s.as_str());
+            let sc = args
+                .get(3)
+                .filter(|s| s.as_str() != "-")
+                .map(|s| s.as_str());
+            let mc = args
+                .get(4)
+                .filter(|s| s.as_str() != "-")
+                .map(|s| s.as_str());
             let agent = http::agent();
             let tracks = providers::library(&agent, sc, mc, sec);
             println!("{} morceaux", tracks.len());
             for t in tracks.iter().take(20) {
-                println!("[{}] {} — {} ({})", t.platform.tag(), t.artist, t.title, t.duration_human());
+                println!(
+                    "[{}] {} — {} ({})",
+                    t.platform.tag(),
+                    t.artist,
+                    t.title,
+                    t.duration_human()
+                );
             }
             return Ok(());
         }
@@ -173,7 +194,11 @@ fn dispatch_effect(
     match eff {
         Effect::Search(q) => *search_rx = Some(spawn_search(q)),
         Effect::LoadLibrary(sec) => {
-            *search_rx = Some(spawn_library(app.sc_handle.clone(), app.mc_handle.clone(), sec));
+            *search_rx = Some(spawn_library(
+                app.sc_handle.clone(),
+                app.mc_handle.clone(),
+                sec,
+            ));
         }
         Effect::SaveAccounts => {
             config.soundcloud = app.sc_handle.clone();

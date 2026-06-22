@@ -135,11 +135,7 @@ fn extract_client_id(js: &str) -> Option<String> {
 }
 
 /// Recherche de morceaux (mode public, sans compte).
-pub fn search(
-    agent: &ureq::Agent,
-    query: &str,
-    limit: u32,
-) -> Result<Vec<Track>, ProviderError> {
+pub fn search(agent: &ureq::Agent, query: &str, limit: u32) -> Result<Vec<Track>, ProviderError> {
     let cid = client_id(agent)?;
     let v: Value = agent
         .get(&format!("{API}/search/tracks"))
@@ -184,7 +180,11 @@ pub fn resolve_user_id(agent: &ureq::Agent, handle: &str) -> Result<i64, Provide
 }
 
 /// Likes publics d'un utilisateur (morceaux). `limit` ≤ 200.
-pub fn user_likes(agent: &ureq::Agent, handle: &str, limit: u32) -> Result<Vec<Track>, ProviderError> {
+pub fn user_likes(
+    agent: &ureq::Agent,
+    handle: &str,
+    limit: u32,
+) -> Result<Vec<Track>, ProviderError> {
     let id = resolve_user_id(agent, handle)?;
     let cid = client_id(agent)?;
     let v: Value = agent
@@ -345,7 +345,7 @@ fn pick_stream(
         }
         candidates.push((score_transcoding(t), t));
     }
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
 
     let mut last_err = None;
     for (_, t) in candidates {
@@ -475,9 +475,9 @@ fn expand_hls(agent: &ureq::Agent, m3u8_url: &str) -> Result<Vec<String>, Provid
                 .map_err(|e| ProviderError::Http(HttpError::Decode(e.to_string())))?;
             match hls::parse(&text2, first) {
                 hls::Playlist::Media(segs) => Ok(segs),
-                hls::Playlist::Master(_) => Err(ProviderError::Malformed(
-                    "master m3u8 imbriqué".into(),
-                )),
+                hls::Playlist::Master(_) => {
+                    Err(ProviderError::Malformed("master m3u8 imbriqué".into()))
+                }
             }
         }
     }
@@ -516,8 +516,10 @@ mod tests {
     #[test]
     fn score_prefere_progressive_mp3() {
         let prog_mp3 = json!({"format":{"protocol":"progressive","mime_type":"audio/mpeg"},"preset":"mp3_0_0"});
-        let hls_aac = json!({"format":{"protocol":"hls","mime_type":"audio/mp4"},"preset":"aac_160k"});
-        let snippet = json!({"format":{"protocol":"progressive","mime_type":"audio/mpeg"},"snipped":true});
+        let hls_aac =
+            json!({"format":{"protocol":"hls","mime_type":"audio/mp4"},"preset":"aac_160k"});
+        let snippet =
+            json!({"format":{"protocol":"progressive","mime_type":"audio/mpeg"},"snipped":true});
         assert!(score_transcoding(&prog_mp3) > score_transcoding(&hls_aac));
         assert!(score_transcoding(&hls_aac) > score_transcoding(&snippet));
     }

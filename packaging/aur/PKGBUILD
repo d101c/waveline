@@ -1,0 +1,26 @@
+# Maintainer: d101c
+# PKGBUILD pour l'AUR : paquet binaire (tire l'archive de la Release GitHub).
+# Nom AUR suggéré : waveline-bin
+pkgname=waveline-bin
+_pkgname=waveline
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="TUI unifiée pour écouter Mixcloud & SoundCloud (cliquable, spectre, MPRIS)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/d101c/waveline"
+license=('MIT')
+# Sortie audio : PipeWire (pw-play) ou ALSA (aplay). On recommande PipeWire.
+depends=()
+optdepends=('pipewire: sortie audio via pw-play (recommandé)'
+            'alsa-utils: sortie audio via aplay (alternative)')
+provides=('waveline')
+conflicts=('waveline')
+source_x86_64=("$_pkgname-$pkgver-x86_64.tar.gz::$url/releases/download/v$pkgver/$_pkgname-x86_64-unknown-linux-musl.tar.gz")
+source_aarch64=("$_pkgname-$pkgver-aarch64.tar.gz::$url/releases/download/v$pkgver/$_pkgname-aarch64-unknown-linux-musl.tar.gz")
+# Remplacer SKIP par les sommes sha256 publiées avec la Release.
+sha256sums_x86_64=('SKIP')
+sha256sums_aarch64=('SKIP')
+
+package() {
+  install -Dm755 "$srcdir/$_pkgname" "$pkgdir/usr/bin/$_pkgname"
+}

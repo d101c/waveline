@@ -33,9 +33,7 @@ pub struct Regions {
 impl Regions {
     /// Retrouve la section cliquée dans la sidebar.
     pub fn section_at(&self, x: u16, y: u16) -> Option<usize> {
-        self.sidebar_rows
-            .iter()
-            .position(|r| contains(r, x, y))
+        self.sidebar_rows.iter().position(|r| contains(r, x, y))
     }
 
     /// Retrouve le filtre dont l'onglet a été cliqué.
@@ -114,7 +112,10 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut Re
     // Titre à gauche.
     let title = Span::styled(
         " waveline ",
-        Style::default().fg(theme.bg).bg(theme.accent).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(theme.bg)
+            .bg(theme.accent)
+            .add_modifier(Modifier::BOLD),
     );
     f.render_widget(Paragraph::new(Line::from(title)), area);
 
@@ -126,15 +127,18 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut Re
     ];
     // Calcule la largeur totale puis pose les onglets en partant de la droite.
     let labels: Vec<String> = tabs.iter().map(|(t, _)| format!(" {t} ")).collect();
-    let total: u16 = labels.iter().map(|s| s.chars().count() as u16).sum::<u16>()
-        + (tabs.len() as u16 - 1);
+    let total: u16 =
+        labels.iter().map(|s| s.chars().count() as u16).sum::<u16>() + (tabs.len() as u16 - 1);
     let mut x = area.x + area.width.saturating_sub(total);
     for (i, (_, filt)) in tabs.iter().enumerate() {
         let w = labels[i].chars().count() as u16;
         let r = Rect::new(x, area.y, w, 1);
         let active = *filt == app.filter;
         let style = if active {
-            Style::default().fg(theme.bg).bg(theme.accent).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(theme.bg)
+                .bg(theme.accent)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.dim)
         };
@@ -185,10 +189,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut R
         for (k, span) in lines.into_iter().enumerate() {
             let y = base + k as u16;
             if y < inner.y + inner.height {
-                f.render_widget(
-                    Paragraph::new(span),
-                    Rect::new(inner.x, y, inner.width, 1),
-                );
+                f.render_widget(Paragraph::new(span), Rect::new(inner.x, y, inner.width, 1));
             }
         }
     }
@@ -233,22 +234,33 @@ fn draw_list(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut Regi
                 .map(|c| c.id == t.id && c.platform == t.platform)
                 .unwrap_or(false);
             let marker = if is_current {
-                if app.playback.playing { "▶ " } else { "⏸ " }
+                if app.playback.playing {
+                    "▶ "
+                } else {
+                    "⏸ "
+                }
             } else {
                 "  "
             };
             let title_style = if is_current {
-                Style::default().fg(theme.playing).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(theme.playing)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(theme.fg)
             };
             let plat = Span::styled(
                 t.platform.tag(),
-                Style::default().fg(theme.platform(t.platform)).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.platform(t.platform))
+                    .add_modifier(Modifier::BOLD),
             );
             let row = Row::new(vec![
                 Cell::from(Span::styled(format!("{marker}{}", t.title), title_style)),
-                Cell::from(Span::styled(t.artist.clone(), Style::default().fg(theme.dim))),
+                Cell::from(Span::styled(
+                    t.artist.clone(),
+                    Style::default().fg(theme.dim),
+                )),
                 Cell::from(Span::styled(
                     t.duration_human(),
                     Style::default().fg(theme.dim),
@@ -301,36 +313,40 @@ fn draw_playbar(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut R
             "⏳",
             Line::from(Span::styled(
                 " ⏳ Chargement…",
-                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
             )),
         )
     } else {
         match &pb.current {
-        Some(t) => {
-            let icon = if pb.playing { "▶" } else { "⏸" };
-            let line = Line::from(vec![
-                Span::styled(
-                    format!(" {icon} "),
-                    Style::default().fg(theme.playing).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("{} — {}", t.artist, t.title),
-                    Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("   vol {}%", pb.volume),
+            Some(t) => {
+                let icon = if pb.playing { "▶" } else { "⏸" };
+                let line = Line::from(vec![
+                    Span::styled(
+                        format!(" {icon} "),
+                        Style::default()
+                            .fg(theme.playing)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("{} — {}", t.artist, t.title),
+                        Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("   vol {}%", pb.volume),
+                        Style::default().fg(theme.dim),
+                    ),
+                ]);
+                (icon, line)
+            }
+            None => (
+                "·",
+                Line::from(Span::styled(
+                    " Rien en lecture ",
                     Style::default().fg(theme.dim),
-                ),
-            ]);
-            (icon, line)
-        }
-        None => (
-            "·",
-            Line::from(Span::styled(
-                " Rien en lecture ",
-                Style::default().fg(theme.dim),
-            )),
-        ),
+                )),
+            ),
         }
     };
     let _ = icon;
@@ -348,7 +364,11 @@ fn draw_playbar(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut R
     let label = format!(
         "{} / {}",
         fmt_duration(pb.position_ms),
-        if dur > 0 { fmt_duration(dur) } else { "--:--".into() }
+        if dur > 0 {
+            fmt_duration(dur)
+        } else {
+            "--:--".into()
+        }
     );
     let gauge = LineGauge::default()
         .filled_style(Style::default().fg(theme.accent))
@@ -391,7 +411,7 @@ fn draw_bars(f: &mut Frame, area: Rect, bands: &[f32]) {
         for (i, &v) in bands.iter().enumerate() {
             let filled = (v.clamp(0.0, 1.0) * total_levels as f32).round() as usize;
             let lvl = filled.saturating_sub(base).min(PER_ROW);
-            let s: String = std::iter::repeat(BLOCKS[lvl]).take(bar_w).collect();
+            let s: String = std::iter::repeat_n(BLOCKS[lvl], bar_w).collect();
             spans.push(Span::styled(s, Style::default().fg(band_color(i, n))));
         }
         f.render_widget(
@@ -418,7 +438,7 @@ fn draw_mirror(f: &mut Frame, area: Rect, bands: &[f32]) {
             let first = (h.saturating_sub(lit)) / 2;
             let on = r >= first && r < first + lit;
             let ch = if on { '█' } else { ' ' };
-            let s: String = std::iter::repeat(ch).take(bar_w).collect();
+            let s: String = std::iter::repeat_n(ch, bar_w).collect();
             spans.push(Span::styled(s, Style::default().fg(band_color(i, n))));
         }
         f.render_widget(
@@ -438,7 +458,7 @@ fn draw_scope(f: &mut Frame, area: Rect, wave: &[f32], theme: &Theme) {
     // Ligne médiane discrète quand il n'y a pas de signal.
     if wave.is_empty() {
         let mid = area.y + (area.height / 2);
-        let line: String = std::iter::repeat('·').take(w).collect();
+        let line: String = std::iter::repeat_n('·', w).collect();
         f.render_widget(
             Paragraph::new(Span::styled(line, Style::default().fg(theme.border))),
             Rect::new(area.x, mid, area.width, 1),
@@ -468,7 +488,11 @@ fn draw_scope(f: &mut Frame, area: Rect, wave: &[f32], theme: &Theme) {
 
 /// Dégradé vert (graves) → rouge (aigus) pour colorer les bandes.
 fn band_color(i: usize, n: usize) -> ratatui::style::Color {
-    let t = if n <= 1 { 0.0 } else { i as f32 / (n - 1) as f32 };
+    let t = if n <= 1 {
+        0.0
+    } else {
+        i as f32 / (n - 1) as f32
+    };
     let r = (40.0 + t * 215.0) as u8;
     let g = (220.0 - t * 150.0) as u8;
     let b = (120.0 - t * 80.0) as u8;
@@ -504,7 +528,10 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         let line = Line::from(vec![
             Span::styled(
                 format!(" {prompt} "),
-                Style::default().fg(theme.bg).bg(theme.accent).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.bg)
+                    .bg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!(" {buf}▏"),

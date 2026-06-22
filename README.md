@@ -1,9 +1,29 @@
-# waveline
+<p align="center">
+  <img src="assets/banner.svg" alt="waveline" width="640">
+</p>
 
-**TUI unifiée pour écouter Mixcloud & SoundCloud depuis la console.** Un seul
-endroit, fluide, cliquable, avec des raccourcis vim — et un binaire Rust
-autonome qui décode et joue l'audio lui-même, sans `mpv`, sans `yt-dlp`, sans
-runtime Python.
+<p align="center">
+  <b>Mixcloud &amp; SoundCloud, réunis dans ton terminal.</b><br>
+  TUI cliquable, raccourcis vim, analyseur de spectre, touches média —
+  un binaire Rust autonome (ni <code>mpv</code>, ni <code>yt-dlp</code>, ni Python).
+</p>
+
+<p align="center">
+  <img src="https://github.com/d101c/waveline/actions/workflows/ci.yml/badge.svg" alt="CI">
+  <img src="https://img.shields.io/crates/v/waveline.svg" alt="crates.io">
+  <img src="https://img.shields.io/npm/v/waveline.svg" alt="npm">
+  <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT">
+</p>
+
+## Installer
+
+```sh
+npx waveline            # essai immédiat (Linux, Node ≥ 14)
+cargo install waveline  # depuis crates.io
+cargo binstall waveline # binaire pré-compilé, sans build
+```
+
+Arch : `yay -S waveline-bin`. Autres canaux & publication : [`docs/PUBLISHING.md`](docs/PUBLISHING.md).
 
 ```
 ┌ waveline ───────────────────────────────────[ Tout  SC  MC ]─┐
