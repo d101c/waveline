@@ -144,8 +144,10 @@ fn run(terminal: &mut Tui, app: &mut App, theme: &Theme) -> io::Result<()> {
             terminal.draw(|f| regions = ui::draw(f, app, theme))?;
         }
 
-        // Timeout court : rafraîchit la position de lecture ~4×/s.
-        if event::poll(Duration::from_millis(250))? {
+        // Cadence adaptative : ~30 fps en lecture (visualiseurs fluides),
+        // ~4 fps au repos (CPU minimal).
+        let tick = if app.playback.playing { 33 } else { 250 };
+        if event::poll(Duration::from_millis(tick))? {
             let effect = match event::read()? {
                 Event::Key(key) => handle_key(app, key),
                 Event::Mouse(m) => handle_mouse(app, &regions, m),
@@ -265,6 +267,9 @@ fn sync_playback(app: &mut App, player: &Player) {
     if let Ok(spec) = s.spectrum.lock() {
         app.playback.spectrum = spec.to_vec();
     }
+    if let Ok(wave) = s.waveform.lock() {
+        app.playback.waveform = wave.clone();
+    }
     if let Ok(mut err) = s.error.lock() {
         if let Some(e) = err.take() {
             app.status = format!("⚠ {e}");
@@ -335,9 +340,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<Effect> {
             app.begin_connect();
             None
         }
+        KeyCode::Char('v') => {
+            app.cycle_viz();
+            None
+        }
         KeyCode::Char('?') => {
             app.status =
-                "Aide : 'c' comptes · ':' URL · '/' rech · j/k naviguer · enter/clic jouer · space pause · n/p · s stop · 1/2/3 filtre · q quitter".into();
+                "Aide : 'c' comptes · 'v' visualiseur · ':' URL · '/' rech · j/k naviguer · enter/clic jouer · space pause · n/p · s stop · 1/2/3 filtre · q quitter".into();
             None
         }
         _ => None,

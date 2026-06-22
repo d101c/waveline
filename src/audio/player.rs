@@ -48,7 +48,12 @@ pub struct Shared {
     pub error: Mutex<Option<String>>,
     /// Amplitudes du spectre par bande (0..1), pour l'analyseur visuel.
     pub spectrum: Mutex<[f32; BANDS]>,
+    /// Échantillons mono récents (~[-1,1]) pour le mode oscilloscope.
+    pub waveform: Mutex<Vec<f32>>,
 }
+
+/// Nombre de points de forme d'onde publiés (rééchantillonnés à l'affichage).
+pub const WAVE_POINTS: usize = 256;
 
 impl Shared {
     fn new(volume: u8) -> Arc<Shared> {
@@ -62,12 +67,14 @@ impl Shared {
             now: Mutex::new(None),
             error: Mutex::new(None),
             spectrum: Mutex::new([0.0; BANDS]),
+            waveform: Mutex::new(Vec::new()),
         })
     }
 
-    /// Remet le spectre à zéro (pause, stop, fin).
+    /// Remet le spectre et la forme d'onde à zéro (pause, stop, fin).
     fn clear_spectrum(&self) {
         *self.spectrum.lock().unwrap() = [0.0; BANDS];
+        self.waveform.lock().unwrap().clear();
     }
 }
 
@@ -346,16 +353,22 @@ fn decode_loop(
             shared.position_ms.store(pos, Ordering::Relaxed);
         }
 
-        // --- Analyseur de spectre (throttlé ~22 Hz, coût négligeable) ---
+        // --- Visualiseurs (throttlé ~30 Hz, coût négligeable) ---
         push_mono(&mut mono, sbuf.samples(), spec.channels.count());
-        if last_fft.elapsed() >= Duration::from_millis(45) && mono.len() >= spectrum::FFT_SIZE {
-            let start = mono.len() - spectrum::FFT_SIZE;
-            let raw = spectrum::compute_bands(&mono[start..]);
+        if last_fft.elapsed() >= Duration::from_millis(33) && mono.len() >= spectrum::FFT_SIZE {
+            let window = &mono[mono.len() - spectrum::FFT_SIZE..];
+            // Spectre : attaque immédiate, décroissance vive (réactif).
+            let raw = spectrum::compute_bands(window);
             if let Ok(mut s) = shared.spectrum.lock() {
                 for i in 0..BANDS {
-                    // Attaque immédiate, décroissance douce (barres qui retombent).
-                    s[i] = raw[i].max(s[i] * 0.80);
+                    s[i] = raw[i].max(s[i] * 0.72);
                 }
+            }
+            // Forme d'onde : sous-échantillonne la fenêtre en WAVE_POINTS points.
+            if let Ok(mut w) = shared.waveform.lock() {
+                w.clear();
+                let step = (window.len() / WAVE_POINTS).max(1);
+                w.extend(window.iter().step_by(step).take(WAVE_POINTS).copied());
             }
             if mono.len() > spectrum::FFT_SIZE * 2 {
                 let cut = mono.len() - spectrum::FFT_SIZE;

@@ -315,7 +315,12 @@ pub fn track_from_json(v: &Value) -> Result<Track, ProviderError> {
     })
 }
 
-/// Choisit la meilleure transcoding et résout son URL signée vers un flux.
+/// Choisit un flux jouable parmi les transcodings, avec repli.
+///
+/// Les variantes chiffrées (DRM : `cbc/ctr-encrypted-hls`) sont écartées —
+/// indéchiffrables. On essaie les candidats jouables par score décroissant ;
+/// si la signature de l'un échoue (souvent 404 pour les titres monétisés), on
+/// passe au suivant. Si seules des variantes DRM existent, on le signale.
 fn pick_stream(
     agent: &ureq::Agent,
     track: &Value,
@@ -327,35 +332,60 @@ fn pick_stream(
         .and_then(|t| t.as_array())
         .ok_or_else(|| ProviderError::Unavailable("aucun flux disponible".into()))?;
 
-    let mut scored: Vec<(i32, &Value)> = transcodings
-        .iter()
-        .map(|t| (score_transcoding(t), t))
-        .collect();
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut candidates: Vec<(i32, &Value)> = Vec::new();
+    let mut has_drm = false;
+    for t in transcodings {
+        let proto = t
+            .pointer("/format/protocol")
+            .and_then(|p| p.as_str())
+            .unwrap_or("");
+        if proto.contains("encrypted") {
+            has_drm = true; // SAMPLE-AES Widevine/PlayReady : non lisible
+            continue;
+        }
+        candidates.push((score_transcoding(t), t));
+    }
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
 
-    let best = scored
-        .first()
-        .map(|(_, t)| *t)
-        .ok_or_else(|| ProviderError::Unavailable("aucune transcoding".into()))?;
+    let mut last_err = None;
+    for (_, t) in candidates {
+        match try_transcoding(agent, track, cid, t) {
+            Ok(src) => return Ok(src),
+            Err(e) => last_err = Some(e),
+        }
+    }
 
-    let endpoint = best
+    if has_drm {
+        Err(ProviderError::Unavailable(
+            "titre protégé (DRM SoundCloud) — non lisible".into(),
+        ))
+    } else {
+        Err(last_err.unwrap_or_else(|| ProviderError::Unavailable("aucun flux jouable".into())))
+    }
+}
+
+/// Tente de signer puis construire le flux d'une transcoding donnée.
+fn try_transcoding(
+    agent: &ureq::Agent,
+    track: &Value,
+    cid: &str,
+    t: &Value,
+) -> Result<StreamSource, ProviderError> {
+    let endpoint = t
         .get("url")
         .and_then(|u| u.as_str())
         .ok_or_else(|| ProviderError::Malformed("transcoding sans url".into()))?;
-    let mime = best
-        .get("format")
-        .and_then(|f| f.get("mime_type"))
+    let mime = t
+        .pointer("/format/mime_type")
         .and_then(|m| m.as_str())
         .unwrap_or("");
-    let protocol = best
-        .get("format")
-        .and_then(|f| f.get("protocol"))
+    let protocol = t
+        .pointer("/format/protocol")
         .and_then(|p| p.as_str())
         .unwrap_or("progressive");
     let container = Container::from_mime(mime);
 
-    // Résout l'URL signée (valable quelques minutes). `track_authorization`
-    // est requis par l'API pour autoriser la signature du flux.
+    // Signe l'URL (valable quelques minutes). `track_authorization` requis.
     let mut req = agent.get(endpoint).query("client_id", cid);
     if let Some(auth) = track.get("track_authorization").and_then(|a| a.as_str()) {
         req = req.query("track_authorization", auth);

@@ -74,7 +74,7 @@ pub fn draw(f: &mut Frame, app: &App, theme: &Theme) -> Regions {
     // Terminal dégénéré (trop petit / taille nulle) : on évite tout rendu qui
     // indexerait hors du buffer, et on invite à agrandir si la place le permet.
     let area = f.area();
-    if area.width < 24 || area.height < 12 {
+    if area.width < 24 || area.height < 14 {
         if area.width >= 1 && area.height >= 1 {
             f.render_widget(
                 Paragraph::new("waveline : agrandis le terminal")
@@ -90,7 +90,7 @@ pub fn draw(f: &mut Frame, app: &App, theme: &Theme) -> Regions {
         .constraints([
             Constraint::Length(1), // header
             Constraint::Min(3),    // corps
-            Constraint::Length(6), // barre de lecture + analyseur
+            Constraint::Length(7), // barre de lecture + analyseur (3 lignes)
             Constraint::Length(1), // ligne de statut + raccourcis
         ])
         .split(f.area());
@@ -356,24 +356,35 @@ fn draw_playbar(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut R
         .ratio(ratio)
         .label(Span::styled(label, Style::default().fg(theme.dim)));
 
-    // Analyseur de spectre au milieu, progression en bas.
-    draw_spectrum(f, rows[1], &pb.spectrum);
+    // Visualiseur au milieu (style choisi par l'utilisateur), progression en bas.
+    draw_visualizer(f, rows[1], app, theme);
     f.render_widget(gauge, rows[2]);
 }
 
-/// Dessine l'analyseur de spectre : une barre verticale par bande, en blocs.
-fn draw_spectrum(f: &mut Frame, area: Rect, bands: &[f32]) {
-    if area.width == 0 || area.height == 0 || bands.is_empty() {
+const BLOCKS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+const PER_ROW: usize = 8;
+
+/// Dispatche vers le style de visualiseur courant.
+fn draw_visualizer(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    if area.width == 0 || area.height == 0 {
         return;
     }
-    const BLOCKS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    const PER_ROW: usize = 8;
+    match app.viz {
+        crate::app::VizMode::Bars => draw_bars(f, area, &app.playback.spectrum),
+        crate::app::VizMode::Mirror => draw_mirror(f, area, &app.playback.spectrum),
+        crate::app::VizMode::Scope => draw_scope(f, area, &app.playback.waveform, theme),
+    }
+}
+
+/// Barres de spectre ancrées en bas (blocs en huitièmes).
+fn draw_bars(f: &mut Frame, area: Rect, bands: &[f32]) {
+    if bands.is_empty() {
+        return;
+    }
     let n = bands.len();
     let bar_w = (area.width as usize / n).max(1);
     let total_levels = area.height as usize * PER_ROW;
-
     for row in 0..area.height {
-        // La ligne du haut correspond aux niveaux les plus élevés.
         let from_bottom = (area.height - 1 - row) as usize;
         let base = from_bottom * PER_ROW;
         let mut spans: Vec<Span> = Vec::with_capacity(n);
@@ -383,10 +394,74 @@ fn draw_spectrum(f: &mut Frame, area: Rect, bands: &[f32]) {
             let s: String = std::iter::repeat(BLOCKS[lvl]).take(bar_w).collect();
             spans.push(Span::styled(s, Style::default().fg(band_color(i, n))));
         }
-        let y = area.y + row;
         f.render_widget(
             Paragraph::new(Line::from(spans)),
-            Rect::new(area.x, y, area.width, 1),
+            Rect::new(area.x, area.y + row, area.width, 1),
+        );
+    }
+}
+
+/// Spectre symétrique autour de la ligne centrale (« waveline »).
+fn draw_mirror(f: &mut Frame, area: Rect, bands: &[f32]) {
+    if bands.is_empty() {
+        return;
+    }
+    let n = bands.len();
+    let bar_w = (area.width as usize / n).max(1);
+    let h = area.height as usize;
+    for row in 0..area.height {
+        let r = row as usize;
+        let mut spans: Vec<Span> = Vec::with_capacity(n);
+        for (i, &v) in bands.iter().enumerate() {
+            // Hauteur lumineuse centrée verticalement.
+            let lit = (v.clamp(0.0, 1.0) * h as f32).round() as usize;
+            let first = (h.saturating_sub(lit)) / 2;
+            let on = r >= first && r < first + lit;
+            let ch = if on { '█' } else { ' ' };
+            let s: String = std::iter::repeat(ch).take(bar_w).collect();
+            spans.push(Span::styled(s, Style::default().fg(band_color(i, n))));
+        }
+        f.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect::new(area.x, area.y + row, area.width, 1),
+        );
+    }
+}
+
+/// Oscilloscope temporel : trace la forme d'onde colonne par colonne.
+fn draw_scope(f: &mut Frame, area: Rect, wave: &[f32], theme: &Theme) {
+    let w = area.width as usize;
+    let h = area.height as usize;
+    if w == 0 || h == 0 {
+        return;
+    }
+    // Ligne médiane discrète quand il n'y a pas de signal.
+    if wave.is_empty() {
+        let mid = area.y + (area.height / 2);
+        let line: String = std::iter::repeat('·').take(w).collect();
+        f.render_widget(
+            Paragraph::new(Span::styled(line, Style::default().fg(theme.border))),
+            Rect::new(area.x, mid, area.width, 1),
+        );
+        return;
+    }
+    // Rangée cible (depuis le haut) pour chaque colonne.
+    let len = wave.len();
+    let target: Vec<usize> = (0..w)
+        .map(|x| {
+            let a = wave[x * len / w].clamp(-1.0, 1.0);
+            let norm = 1.0 - (a + 1.0) / 2.0; // 0 = haut, 1 = bas
+            (norm * (h as f32 - 1.0)).round() as usize
+        })
+        .collect();
+    for row in 0..area.height {
+        let r = row as usize;
+        let s: String = (0..w)
+            .map(|x| if target[x] == r { '█' } else { ' ' })
+            .collect();
+        f.render_widget(
+            Paragraph::new(Span::styled(s, Style::default().fg(theme.accent))),
+            Rect::new(area.x, area.y + row, area.width, 1),
         );
     }
 }

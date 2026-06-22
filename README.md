@@ -33,8 +33,9 @@ chercher, et écouter les deux au même endroit, à la souris **ou** au clavier.
   via PipeWire (`pw-play`) ou ALSA (`aplay`). Aucun lecteur externe requis.
 - **Cliquable ET clavier** — clic sur une piste pour jouer, clic sur les onglets
   de filtre, la barre play/pause ; ou tout au clavier en style vim.
-- **Analyseur de spectre intégré** — barres par bandes en temps réel sous la
-  barre de lecture (FFT maison, calcul throttlé → coût CPU négligeable).
+- **Visualiseurs intégrés, réactifs** — 3 styles cyclés avec `v` : barres de
+  spectre, miroir (« waveline »), oscilloscope. FFT maison ~30 Hz, rendu ~30 fps
+  en lecture, coût CPU négligeable.
 - **Touches média & contrôles du bureau** — via MPRIS (D-Bus) : Play/Pause,
   Suivant, Précédent, Stop depuis les touches média du clavier, le panneau
   GNOME et l'écran de verrouillage ; titre/artiste/durée y sont affichés.
@@ -66,10 +67,11 @@ Lance `waveline`, puis :
 | `j` / `k` ou `↑`/`↓` | naviguer | | `/` | rechercher (SC + MC) |
 | `Entrée` / clic | jouer la sélection | | `:` | coller une URL et jouer |
 | `Espace` | play / pause | | `c` | connecter tes comptes |
-| `n` / `p` | suivant / précédent | | `1` `2` `3` | filtre Tout / SC / MC |
-| `s` | stop | | `Tab` | changer de panneau |
-| `+` / `-` | volume | | `q` | quitter |
-| `g` / `G` | haut / bas de liste | | `?` | aide |
+| `n` / `p` | suivant / précédent | | `v` | changer de visualiseur |
+| `s` | stop | | `1` `2` `3` | filtre Tout / SC / MC |
+| `+` / `-` | volume | | `Tab` | changer de panneau |
+| `g` / `G` | haut / bas de liste | | `q` | quitter |
+| | | | `?` | aide |
 
 ### Connexion à tes comptes
 

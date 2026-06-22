@@ -108,6 +108,36 @@ pub struct Playback {
     pub volume: u8,
     /// Amplitudes du spectre par bande (0..1), pour l'analyseur visuel.
     pub spectrum: Vec<f32>,
+    /// Échantillons de forme d'onde (~[-1,1]) pour le mode oscilloscope.
+    pub waveform: Vec<f32>,
+}
+
+/// Style d'analyseur visuel (cyclé avec `v`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VizMode {
+    /// Barres de spectre ancrées en bas.
+    Bars,
+    /// Spectre symétrique autour d'une ligne centrale (« waveline »).
+    Mirror,
+    /// Oscilloscope temporel (forme d'onde brute), très réactif.
+    Scope,
+}
+
+impl VizMode {
+    pub const ALL: [VizMode; 3] = [VizMode::Bars, VizMode::Mirror, VizMode::Scope];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            VizMode::Bars => "barres",
+            VizMode::Mirror => "miroir",
+            VizMode::Scope => "oscilloscope",
+        }
+    }
+
+    pub fn next(self) -> VizMode {
+        let i = Self::ALL.iter().position(|m| *m == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
+    }
 }
 
 /// Effets de bord exécutés par la boucle principale (audio, réseau, disque).
@@ -162,6 +192,8 @@ pub struct App {
     pub sc_handle: Option<String>,
     /// Pseudo Mixcloud connecté.
     pub mc_handle: Option<String>,
+    /// Style d'analyseur visuel courant.
+    pub viz: VizMode,
 }
 
 impl App {
@@ -183,12 +215,19 @@ impl App {
             input: Input::Normal,
             sc_handle: None,
             mc_handle: None,
+            viz: VizMode::Bars,
         }
     }
 
     /// Indique si au moins un compte est connecté.
     pub fn has_account(&self) -> bool {
         self.sc_handle.is_some() || self.mc_handle.is_some()
+    }
+
+    /// Passe au style de visualiseur suivant.
+    pub fn cycle_viz(&mut self) {
+        self.viz = self.viz.next();
+        self.status = format!("Visualiseur : {}", self.viz.label());
     }
 
     /// Indices des morceaux visibles après application du filtre courant.
@@ -547,6 +586,18 @@ mod tests {
         }
         assert_eq!(a.playback.volume, 100);
         assert_eq!(last, Some(Effect::SetVolume(100)));
+    }
+
+    #[test]
+    fn cycle_visualiseur_boucle_sur_les_trois() {
+        let mut a = App::new();
+        assert_eq!(a.viz, VizMode::Bars);
+        a.cycle_viz();
+        assert_eq!(a.viz, VizMode::Mirror);
+        a.cycle_viz();
+        assert_eq!(a.viz, VizMode::Scope);
+        a.cycle_viz();
+        assert_eq!(a.viz, VizMode::Bars);
     }
 
     #[test]
