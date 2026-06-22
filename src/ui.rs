@@ -1,0 +1,371 @@
+//! Rendu de l'interface + cartographie des zones cliquables.
+//!
+//! `draw` retourne un [`Regions`] qui mémorise où chaque élément interactif a
+//! été dessiné, afin que la boucle d'événements puisse traduire un clic
+//! (colonne, ligne) en [`Action`](crate::app::Action) ou en sélection.
+
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Cell, LineGauge, Paragraph, Row, Table, TableState,
+};
+use ratatui::Frame;
+
+use crate::app::{App, Filter, Focus, Section};
+use crate::model::{fmt_duration, Platform};
+use crate::theme::Theme;
+
+/// Zones interactives mémorisées au dernier rendu, pour le hit-test souris.
+#[derive(Default, Clone)]
+pub struct Regions {
+    pub sidebar_rows: Vec<Rect>,
+    /// (rect de l'onglet, filtre associé)
+    pub filter_tabs: Vec<(Rect, Filter)>,
+    /// Zone interne de la liste (sans bordure) + premier index visible.
+    pub list_inner: Rect,
+    pub list_first: usize,
+    pub list_len: usize,
+    /// Bouton play/pause de la barre de lecture.
+    pub playpause_btn: Rect,
+}
+
+impl Regions {
+    /// Retrouve la section cliquée dans la sidebar.
+    pub fn section_at(&self, x: u16, y: u16) -> Option<usize> {
+        self.sidebar_rows
+            .iter()
+            .position(|r| contains(r, x, y))
+    }
+
+    /// Retrouve le filtre dont l'onglet a été cliqué.
+    pub fn filter_at(&self, x: u16, y: u16) -> Option<Filter> {
+        self.filter_tabs
+            .iter()
+            .find(|(r, _)| contains(r, x, y))
+            .map(|(_, f)| *f)
+    }
+
+    /// Index (dans la liste filtrée) de la ligne cliquée.
+    pub fn list_row_at(&self, x: u16, y: u16) -> Option<usize> {
+        if !contains(&self.list_inner, x, y) {
+            return None;
+        }
+        let offset = (y - self.list_inner.y) as usize + self.list_first;
+        if offset < self.list_len {
+            Some(offset)
+        } else {
+            None
+        }
+    }
+
+    pub fn playpause_at(&self, x: u16, y: u16) -> bool {
+        contains(&self.playpause_btn, x, y)
+    }
+}
+
+fn contains(r: &Rect, x: u16, y: u16) -> bool {
+    x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
+}
+
+pub fn draw(f: &mut Frame, app: &App, theme: &Theme) -> Regions {
+    let mut regions = Regions::default();
+
+    let root = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // header
+            Constraint::Min(3),    // corps
+            Constraint::Length(3), // barre de lecture
+            Constraint::Length(1), // ligne de statut + raccourcis
+        ])
+        .split(f.area());
+
+    draw_header(f, root[0], app, theme, &mut regions);
+
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(24), Constraint::Min(20)])
+        .split(root[1]);
+
+    draw_sidebar(f, body[0], app, theme, &mut regions);
+    draw_list(f, body[1], app, theme, &mut regions);
+    draw_playbar(f, root[2], app, theme, &mut regions);
+    draw_status(f, root[3], app, theme);
+
+    regions
+}
+
+fn draw_header(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut Regions) {
+    // Titre à gauche.
+    let title = Span::styled(
+        " waveline ",
+        Style::default().fg(theme.bg).bg(theme.accent).add_modifier(Modifier::BOLD),
+    );
+    f.render_widget(Paragraph::new(Line::from(title)), area);
+
+    // Onglets de filtre à droite : [Tout] [SC] [MC].
+    let tabs = [
+        ("Tout", Filter::All),
+        ("SC", Filter::Only(Platform::SoundCloud)),
+        ("MC", Filter::Only(Platform::Mixcloud)),
+    ];
+    // Calcule la largeur totale puis pose les onglets en partant de la droite.
+    let labels: Vec<String> = tabs.iter().map(|(t, _)| format!(" {t} ")).collect();
+    let total: u16 = labels.iter().map(|s| s.chars().count() as u16).sum::<u16>()
+        + (tabs.len() as u16 - 1);
+    let mut x = area.x + area.width.saturating_sub(total);
+    for (i, (_, filt)) in tabs.iter().enumerate() {
+        let w = labels[i].chars().count() as u16;
+        let r = Rect::new(x, area.y, w, 1);
+        let active = *filt == app.filter;
+        let style = if active {
+            Style::default().fg(theme.bg).bg(theme.accent).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.dim)
+        };
+        f.render_widget(Paragraph::new(Span::styled(labels[i].clone(), style)), r);
+        reg.filter_tabs.push((r, *filt));
+        x += w + 1;
+    }
+}
+
+fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut Regions) {
+    let active = app.focus == Focus::Sidebar;
+    let block = panel_block("Sources", active, theme);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    for (i, section) in Section::ALL.iter().enumerate() {
+        let y = inner.y + i as u16;
+        if y >= inner.y + inner.height {
+            break;
+        }
+        let row = Rect::new(inner.x, y, inner.width, 1);
+        let selected = i == app.section_index;
+        let mut style = Style::default().fg(theme.fg);
+        if selected {
+            style = style.bg(theme.selection_bg).add_modifier(Modifier::BOLD);
+            if active {
+                style = style.fg(theme.accent);
+            }
+        }
+        let label = format!(" {}", section.label());
+        f.render_widget(Paragraph::new(Span::styled(label, style)), row);
+        reg.sidebar_rows.push(row);
+    }
+}
+
+fn draw_list(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut Regions) {
+    let active = app.focus == Focus::List;
+    let title = format!("{}  ·  {}", app.section.label().trim(), app.filter.label());
+    let block = panel_block(&title, active, theme);
+    let inner = block.inner(area);
+    f.render_widget(&block, area);
+
+    let visible = app.visible_indices();
+    reg.list_inner = inner;
+    reg.list_len = visible.len();
+
+    if visible.is_empty() {
+        let hint = Paragraph::new(Line::from(Span::styled(
+            "  (vide — colle une URL avec : ou lance une recherche avec /)",
+            Style::default().fg(theme.dim),
+        )));
+        f.render_widget(hint, inner);
+        return;
+    }
+
+    // Fenêtre de défilement simple centrée sur la sélection.
+    let height = inner.height as usize;
+    let first = scroll_first(app.list_index, visible.len(), height);
+    reg.list_first = first;
+
+    let rows: Vec<Row> = visible
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(height)
+        .map(|(vis_i, &track_i)| {
+            let t = &app.tracks[track_i];
+            let is_current = app
+                .playback
+                .current
+                .as_ref()
+                .map(|c| c.id == t.id && c.platform == t.platform)
+                .unwrap_or(false);
+            let marker = if is_current {
+                if app.playback.playing { "▶ " } else { "⏸ " }
+            } else {
+                "  "
+            };
+            let title_style = if is_current {
+                Style::default().fg(theme.playing).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.fg)
+            };
+            let plat = Span::styled(
+                t.platform.tag(),
+                Style::default().fg(theme.platform(t.platform)).add_modifier(Modifier::BOLD),
+            );
+            let row = Row::new(vec![
+                Cell::from(Span::styled(format!("{marker}{}", t.title), title_style)),
+                Cell::from(Span::styled(t.artist.clone(), Style::default().fg(theme.dim))),
+                Cell::from(Span::styled(
+                    t.duration_human(),
+                    Style::default().fg(theme.dim),
+                )),
+                Cell::from(plat),
+            ]);
+            let _ = vis_i;
+            row
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Percentage(50),
+        Constraint::Percentage(34),
+        Constraint::Length(8),
+        Constraint::Length(3),
+    ];
+    let mut state = TableState::default();
+    state.select(Some(app.list_index.saturating_sub(first)));
+    let table = Table::new(rows, widths)
+        .row_highlight_style(
+            Style::default()
+                .bg(theme.selection_bg)
+                .add_modifier(Modifier::BOLD),
+        )
+        .column_spacing(1);
+    f.render_stateful_widget(table, inner, &mut state);
+}
+
+fn draw_playbar(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut Regions) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(1)])
+        .split(inner);
+
+    let pb = &app.playback;
+    let (icon, line) = match &pb.current {
+        Some(t) => {
+            let icon = if pb.playing { "▶" } else { "⏸" };
+            let line = Line::from(vec![
+                Span::styled(
+                    format!(" {icon} "),
+                    Style::default().fg(theme.playing).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{} — {}", t.artist, t.title),
+                    Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("   vol {}%", pb.volume),
+                    Style::default().fg(theme.dim),
+                ),
+            ]);
+            (icon, line)
+        }
+        None => (
+            "·",
+            Line::from(Span::styled(
+                " Rien en lecture ",
+                Style::default().fg(theme.dim),
+            )),
+        ),
+    };
+    let _ = icon;
+    f.render_widget(Paragraph::new(line), rows[0]);
+    // Le bouton play/pause = les 3 premières colonnes de la première ligne.
+    reg.playpause_btn = Rect::new(rows[0].x, rows[0].y, 3, 1);
+
+    // Barre de progression.
+    let dur = pb.current.as_ref().and_then(|t| t.duration_ms).unwrap_or(0);
+    let ratio = if dur > 0 {
+        (pb.position_ms as f64 / dur as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let label = format!(
+        "{} / {}",
+        fmt_duration(pb.position_ms),
+        if dur > 0 { fmt_duration(dur) } else { "--:--".into() }
+    );
+    let gauge = LineGauge::default()
+        .filled_style(Style::default().fg(theme.accent))
+        .unfilled_style(Style::default().fg(theme.border))
+        .ratio(ratio)
+        .label(Span::styled(label, Style::default().fg(theme.dim)));
+    f.render_widget(gauge, rows[1]);
+}
+
+fn draw_status(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let keys = "[space] play  [n/p] suiv/préc  [/] rech  [:] cmd  [tab] focus  [1·2·3] filtre  [?] aide  [q] quitter";
+    let line = Line::from(vec![
+        Span::styled(format!(" {} ", app.status), Style::default().fg(theme.fg)),
+        Span::styled(format!("  {keys}"), Style::default().fg(theme.dim)),
+    ]);
+    f.render_widget(Paragraph::new(line), area);
+}
+
+/// Bloc encadré standard, surligné quand le panneau a le focus.
+fn panel_block(title: &str, active: bool, theme: &Theme) -> Block<'static> {
+    let border = if active {
+        theme.border_active
+    } else {
+        theme.border
+    };
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border))
+        .title(Span::styled(
+            format!(" {title} "),
+            Style::default()
+                .fg(if active { theme.accent } else { theme.fg })
+                .add_modifier(Modifier::BOLD),
+        ))
+}
+
+/// Détermine le premier index visible pour garder la sélection à l'écran.
+fn scroll_first(selected: usize, total: usize, height: usize) -> usize {
+    if total <= height || height == 0 {
+        return 0;
+    }
+    let half = height / 2;
+    let max_first = total - height;
+    selected.saturating_sub(half).min(max_first)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scroll_garde_la_selection_visible() {
+        // En haut : pas de décalage.
+        assert_eq!(scroll_first(0, 100, 10), 0);
+        // Au milieu : centré.
+        assert_eq!(scroll_first(50, 100, 10), 45);
+        // En bas : borné à max_first.
+        assert_eq!(scroll_first(99, 100, 10), 90);
+        // Liste plus courte que la fenêtre.
+        assert_eq!(scroll_first(3, 5, 10), 0);
+    }
+
+    #[test]
+    fn contains_teste_les_bornes() {
+        let r = Rect::new(2, 3, 4, 2);
+        assert!(contains(&r, 2, 3));
+        assert!(contains(&r, 5, 4));
+        assert!(!contains(&r, 6, 3));
+        assert!(!contains(&r, 2, 5));
+    }
+}

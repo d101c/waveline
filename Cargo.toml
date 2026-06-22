@@ -1,6 +1,40 @@
 [package]
 name = "waveline"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+description = "TUI unifiée pour écouter Mixcloud & SoundCloud depuis la console — binaire Rust autonome, cliquable, raccourcis vim"
+license = "MIT"
+repository = "https://github.com/d101c/waveline"
+
+[[bin]]
+name = "waveline"
+path = "src/main.rs"
 
 [dependencies]
+# TUI cliquable (souris + clavier)
+ratatui = "0.29"
+crossterm = "0.28"
+
+# HTTP bloquant 100% Rust (rustls) — pas de tokio, pas d'OpenSSL système
+ureq = { version = "2.12", features = ["json", "tls"], default-features = false }
+
+# (de)sérialisation
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# décodage audio 100% Rust (mp3 progressif SoundCloud, AAC/MP4 HLS Mixcloud)
+symphonia = { version = "0.5", default-features = false, features = [
+    "mp3",
+    "aac",
+    "isomp4",
+    "alac",
+] }
+
+# chemins de config standards (~/.config, ~/.cache) — minuscule
+dirs = "5"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+panic = "abort"

@@ -1,0 +1,249 @@
+{
+  "found": [
+    {
+      "facet": "Résolution d'un flux audio jouable depuis une URL SoundCloud en HTTP direct, sans yt-dlp (reproduction de l'algorithme du SoundCloud extractor de yt-dlp / clients tiers)",
+      "summary": "SoundCloud expose une API interne non documentée sur api-v2.soundcloud.com qui ne requiert pas de clé officielle (l'inscription publique est fermée depuis 2017) mais un client_id public extrait du front-end web. L'algorithme complet est : (1) scraper client_id depuis les bundles JS de soundcloud.com (hébergés sur a-v2.sndcdn.com/assets/*.js), (2) résoudre l'URL du morceau via /resolve?url=... pour obtenir l'objet track avec son tableau media.transcodings, (3) choisir une transcoding (progressive=fichier MP3 direct, ou hls=playlist segmentée; mime audio/mpeg ou audio/ogg;codecs=opus), puis appeler le champ transcoding.url avec le client_id : cela renvoie un JSON {url:\"...\"} contenant l'URL SIGNÉE (CDN cf-hls/cf-media, valide ~quelques minutes). (4) Pour progressive l'URL est un MP3 lisible directement; pour HLS l'URL est un .m3u8 à parser/concaténer (ou à passer à ffmpeg/un lecteur HLS). Les client_id tournent fréquemment et les appels renvoient 401/403 quand le client_id est invalide -> il faut le re-scraper et invalider le cache.",
+      "key_facts": [
+        "L'inscription à l'API publique SoundCloud est fermée depuis 2017 : impossible d'obtenir une clé officielle. La solution non-yt-dlp = réutiliser le client_id public du web player.",
+        "client_id est une chaîne alphanumérique de 32 caractères : regex exacte de yt-dlp = client_id\\s*:\\s*\"([0-9a-zA-Z]{32})\" (en JS minifié c'est souvent client_id:\"...\").",
+        "Pipeline scraping client_id : GET https://soundcloud.com/ -> extraire toutes les balises <script src=\"...\"> (regex <script[^>]+src=\"([^\"]+)\") -> ces JS sont hébergés sur https://a-v2.sndcdn.com/assets/<hash>.js -> télécharger chaque asset (yt-dlp itère en ordre INVERSE car le client_id est dans les derniers bundles) -> appliquer la regex -> mettre en cache. Invalider et re-scraper sur 401/403.",
+        "Base API : https://api-v2.soundcloud.com/ . Tous les appels DOIVENT porter ?client_id=<CLIENT_ID> (et &secret_token=<token> pour contenu privé).",
+        "Endpoint resolve (point d'entrée pour toute URL publique) : GET https://api-v2.soundcloud.com/resolve?url=<URL_ENCODEE>&client_id=<CLIENT_ID> -> renvoie l'objet track JSON complet (id, title, media.transcodings, etc.). Alternative si on connaît l'id : GET /tracks/<track_id>?client_id=...",
+        "Structure media.transcodings[] : chaque entrée a { url, preset (ex http_mp3_128, hls_mp3_128, hls_opus_64, hls_aac_160), format:{ protocol:'progressive'|'hls'|'encrypted-hls', mime_type:'audio/mpeg' | 'audio/ogg; codecs=\"opus\"' | 'audio/mp4; codecs=\"mp4a.40.2\"' }, quality, snipped }.",
+        "Etape clé (URL signée) : le champ transcoding.url n'est PAS le flux. Il faut faire GET <transcoding.url>?client_id=<CLIENT_ID> -> réponse JSON { \"url\": \"https://cf-...sndcdn.com/.../playlist.m3u8?...signature...\" } (ou un .mp3 pour progressive). Cette URL signée expire en quelques minutes.",
+        "Protocole 'progressive' (mime audio/mpeg, preset http_mp3_128) : l'URL signée renvoyée est un fichier MP3 complet -> téléchargeable/jouable directement en HTTP (Range supporté). C'est le cas le PLUS SIMPLE, à privilégier quand disponible.",
+        "Protocole 'hls' / 'encrypted-hls' (mp3, opus ou aac) : l'URL signée est un manifeste .m3u8. Il faut récupérer le m3u8, lire la liste des segments (#EXTINF + URLs de segments, souvent des .mp3/.ts/.m4s déjà signés et publics), puis les TÉLÉCHARGER DANS L'ORDRE et les CONCATÉNER pour reconstituer le flux. Plus simple : passer l'URL .m3u8 directement à ffmpeg (ffmpeg -i playlist.m3u8 -c copy out.mp3) ou à un lecteur HLS natif (hls.js, AVPlayer, ExoPlayer).",
+        "encrypted-hls : segments chiffrés AES-128 (yt-dlp = protocole 'hls-aes'), clé indiquée par #EXT-X-KEY dans le m3u8 ; ffmpeg/hls.js gèrent le déchiffrement automatiquement.",
+        "Mapping codec (yt-dlp) : mime contient codecs=\"opus\" -> .opus ; codecs=\"mp4a\" -> .m4a (conteneur m4a_dash) ; audio/mpeg -> .mp3. Bitrate extrait du preset via regex (\\d+)k$ ou de l'URL via \\.(\\d+)\\.(?:opus|mp3).",
+        "Détection extrait/preview (30s, comptes non premium) : champ snipped:true, ou '/preview/' / '/playlist/0/30/' dans l'URL -> yt-dlp leur donne preference=-10. Le morceau complet n'est servi que si le compte/token y donne droit.",
+        "Header recommandé : User-Agent de navigateur réaliste. Certains setups ajoutent Authorization: OAuth <token> au lieu de client_id pour les comptes connectés/premium, mais client_id seul suffit pour les morceaux publics streamables."
+      ],
+      "code_or_endpoints": [
+        "GET https://soundcloud.com/  (récupérer le HTML)",
+        "Regex scripts: <script[^>]+src=\"([^\"]+)\"  -> URLs https://a-v2.sndcdn.com/assets/<hash>.js",
+        "Regex client_id (yt-dlp): client_id\\s*:\\s*\"([0-9a-zA-Z]{32})\"",
+        "RESOLVE: GET https://api-v2.soundcloud.com/resolve?url=https%3A%2F%2Fsoundcloud.com%2F<user>%2F<track>&client_id=<CLIENT_ID>",
+        "Alt: GET https://api-v2.soundcloud.com/tracks/<track_id>?client_id=<CLIENT_ID>",
+        "Dans la réponse: media.transcodings[i].url , media.transcodings[i].format.protocol , .format.mime_type , .preset",
+        "SIGNED URL: GET <media.transcodings[i].url>?client_id=<CLIENT_ID>  -> réponse JSON {\"url\":\"<URL_SIGNEE>\"}",
+        "Progressive -> URL signée = .mp3 direct (HTTP GET, Range OK)",
+        "HLS -> URL signée = .m3u8 -> ffmpeg -i \"<m3u8>\" -c copy out.mp3   OU parser #EXTINF/segments et concaténer",
+        "Algorithme complet: 1) get/cache client_id (re-scrape si 401/403) ; 2) /resolve?url=...&client_id=... ; 3) choisir transcoding (préférer protocol=progressive mime audio/mpeg, sinon hls) ; 4) GET transcoding.url?client_id=... -> {url} ; 5) progressive: stream le mp3 ; hls: passer le m3u8 à ffmpeg/lecteur HLS ou télécharger+concaténer les segments ; 6) URLs signées expirent en minutes -> les résoudre juste avant lecture."
+      ],
+      "risks": [
+        "Légal/ToS : l'API api-v2 est interne et non documentée ; télécharger/ré-héberger le flux audio viole les Conditions d'utilisation SoundCloud et potentiellement le droit d'auteur. Usage type lecteur/proxy à risque de blocage.",
+        "client_id volatile : il tourne régulièrement et peut être révoqué -> prévoir re-scraping automatique et invalidation de cache sur 401/403 (sinon panne silencieuse).",
+        "URLs signées éphémères : les URLs renvoyées par {url} expirent en quelques minutes -> ne pas les cacher longtemps, les résoudre à la demande.",
+        "Rate limiting / 429 : appels massifs avec un même client_id depuis une même IP -> throttling ou ban. Espacer/rotater.",
+        "Previews 30s : morceaux 'snipped' (Go+/premium) ne donnent qu'un extrait via client_id public ; le complet exige un compte autorisé (Authorization OAuth).",
+        "encrypted-hls (AES-128) : nécessite un client gérant #EXT-X-KEY (ffmpeg/hls.js OK) ; concaténation manuelle des segments échoue sans déchiffrement.",
+        "Fragilité : SoundCloud peut changer le chemin des assets JS (a-v2.sndcdn.com), la regex, ou la structure transcodings -> casse non versionnée. yt-dlp reste la référence à jour à recopier."
+      ],
+      "sources": [
+        "https://raw.githubusercontent.com/yt-dlp/yt-dlp/master/yt_dlp/extractor/soundcloud.py",
+        "https://github.com/zackradisic/soundcloud-api/blob/master/clientid.go",
+        "https://www.npmjs.com/package/soundcloud.ts",
+        "https://developers.soundcloud.com/docs/api/introduction",
+        "https://dev.to/agenthustler/soundcloud-scraping-extract-tracks-artists-and-playlist-data-3513",
+        "https://roundproxies.com/blog/scrape-soundcloud/"
+      ]
+    },
+    {
+      "facet": "Authentification utilisateur SoundCloud (2026) pour accéder à ses likes/playlists/followings : statut app dev, OAuth 2.1/PKCE, et contournement api-v2 client_id + oauth_token.",
+      "summary": "En 2026, l'enregistrement d'app développeur SoundCloud existe formellement mais est verrouillé en pratique : il exige un abonnement Artist Pro et l'octroi des credentials reste discrétionnaire/lent, et SoundCloud a historiquement fermé les nouvelles inscriptions par vagues. L'API officielle (api.soundcloud.com) utilise désormais OAuth 2.1 avec PKCE OBLIGATOIRE (deadline migration passée le 1er oct 2024, aucune exception) : authorize sur secure.soundcloud.com/authorize, token sur secure.soundcloud.com/oauth/token, Authorization: OAuth <token>. Pour accéder aux likes/playlists/followings d'un utilisateur SANS app dev, la voie pratique est l'API interne api-v2.soundcloud.com avec un client_id public extrait du site + l'identifiant user. Les données de profil PUBLIC (tracks, playlists publiques, followings) sont accessibles avec client_id seul ; les likes de pistes et données privées (/me) exigent un oauth_token. L'utilisateur fournit son identité en collant l'oauth_token lu dans l'en-tête Authorization de ses propres requêtes réseau (DevTools > Network) après login — il n'existe pas de moyen propre et supporté sans app dev. Tout cela est non-officiel, fragile et viole les ToS.",
+      "key_facts": [
+        "Statut app dev 2026 : le portail developers.soundcloud.com/docs/api/register-app décrit toujours l'inscription mais impose un abonnement Artist Pro pour recevoir des credentials ; l'octroi est discrétionnaire et SoundCloud a fermé/restreint les nouvelles apps par périodes — considérer l'accès officiel comme quasi-fermé et non garanti.",
+        "OAuth officiel = OAuth 2.1, PKCE OBLIGATOIRE depuis le 1er octobre 2024 ; OAuth 2.0 déprécié, aucune exception accordée. Le seul flow utilisateur est authorization_code + PKCE (code_challenge_method=S256). Client Credentials existe mais n'authentifie que l'app (ressources publiques uniquement, pas /me).",
+        "Hôtes officiels : authorize = https://secure.soundcloud.com/authorize ; token = https://secure.soundcloud.com/oauth/token ; base API = https://api.soundcloud.com . En-tête d'auth = 'Authorization: OAuth ACCESS_TOKEN' (PAS 'Bearer').",
+        "Tokens : access_token ~1h (expires_in), refresh_token single-use (rotation), réponse contient access_token/refresh_token/expires_in/scope.",
+        "API-v2 interne (non-officielle, api-v2.soundcloud.com) : accessible avec un client_id public extrait du trafic réseau du site. Données PUBLIQUES (profil, tracks, playlists publiques, followings) lisibles avec client_id SEUL ; likes de pistes et endpoints /me nécessitent en plus un oauth_token de l'utilisateur connecté.",
+        "Le paramètre client_id en query string sur api-v2 est officiellement déprécié côté SoundCloud (issue soundcloud/api #145) — il fonctionne encore en pratique mais peut casser ; certains endpoints attendent désormais l'Authorization header.",
+        "Fourniture d'identité sans app dev : l'utilisateur se connecte sur soundcloud.com, ouvre DevTools (F12) > Network, rafraîchit, repère une requête api-v2 et copie la valeur de l'en-tête Authorization (format 'OAuth xxxxx') ainsi que le client_id dans l'URL. Il colle ces deux valeurs dans l'outil. C'est la seule méthode 'coller un oauth_token depuis le navigateur'.",
+        "Tout usage de api-v2 + token de cookie est NON officiel, sujet à changement sans préavis et viole les Terms of Use de SoundCloud (risque de blocage du compte / rate-limit / IP ban)."
+      ],
+      "code_or_endpoints": [
+        "OAuth 2.1 authorize (officiel) : GET https://secure.soundcloud.com/authorize?client_id=CLIENT_ID&redirect_uri=REDIRECT&response_type=code&code_challenge=CHALLENGE&code_challenge_method=S256&state=STATE&scope=",
+        "OAuth 2.1 token exchange (officiel) : POST https://secure.soundcloud.com/oauth/token  body: grant_type=authorization_code&client_id=...&client_secret=...&redirect_uri=...&code_verifier=VERIFIER&code=AUTH_CODE",
+        "OAuth refresh : POST https://secure.soundcloud.com/oauth/token  grant_type=refresh_token&client_id=...&client_secret=...&refresh_token=...",
+        "Auth header pour toutes les requêtes officielles : 'Authorization: OAuth ACCESS_TOKEN'",
+        "Officiel /me (utilisateur authentifié) : GET https://api.soundcloud.com/me",
+        "Officiel likes utilisateur authentifié : GET https://api.soundcloud.com/me/likes/tracks  (remplace l'ancien /me/favorites/ids déprécié)",
+        "Officiel likes d'un user public : GET https://api.soundcloud.com/users/{id}/likes/tracks",
+        "Officiel playlists d'un user : GET https://api.soundcloud.com/users/{id}/playlists",
+        "Officiel followings d'un user : GET https://api.soundcloud.com/users/{id}/followings",
+        "API-v2 likes (token requis) : GET https://api-v2.soundcloud.com/users/{id}/track_likes?client_id=CID&limit=50&offset=0&linked_partitioning=1  (Authorization: OAuth TOKEN)",
+        "API-v2 playlists possédées+likées (token requis) : GET https://api-v2.soundcloud.com/users/{id}/playlists/liked_and_owned?client_id=CID&limit=50",
+        "API-v2 playlists publiques d'un user (client_id souvent suffisant) : GET https://api-v2.soundcloud.com/users/{id}/playlists_without_albums?client_id=CID&limit=50&linked_partitioning=1",
+        "API-v2 followings (token requis pour liste complète) : GET https://api-v2.soundcloud.com/users/{id}/followings?client_id=CID&limit=50  (ou /followings/ids)",
+        "API-v2 résolution d'URL -> objet user/track (client_id seul) : GET https://api-v2.soundcloud.com/resolve?url=https://soundcloud.com/USERNAME&client_id=CID  (renvoie l'id numérique de l'utilisateur)",
+        "API-v2 pagination : réponses paginées via champ 'next_href' (utiliser linked_partitioning=1) ; suivre next_href en ajoutant client_id.",
+        "Extraction client_id : charger https://soundcloud.com puis grep dans les bundles JS (a-v2.sndcdn.com/.../app-*.js) le motif client_id=XXXXXXXX ; ou DevTools Network. Extraction oauth_token : en-tête Authorization 'OAuth ...' d'une requête api-v2 une fois connecté.",
+        "Étapes pratiques sans app dev : 1) user colle son client_id + oauth_token ; 2) resolve son URL profil -> user id ; 3) appeler /users/{id}/track_likes, /playlists/liked_and_owned, /followings avec Authorization: OAuth token ; 4) paginer via next_href."
+      ],
+      "risks": [
+        "L'enregistrement d'app officiel peut être indisponible/refusé : exige Artist Pro payant et l'approbation n'est pas garantie en 2026 — ne pas baser une fonctionnalité critique dessus.",
+        "api-v2.soundcloud.com est une API interne NON documentée et NON supportée : endpoints, noms de champs (likes vs track_likes) et exigences d'auth changent sans préavis et peuvent casser à tout moment.",
+        "Le client_id en query string est officiellement déprécié (issue #145) ; à terme seul l'Authorization header pourra fonctionner pour les ressources publiques.",
+        "Utiliser l'oauth_token tiré des cookies/headers du navigateur viole les Terms of Use SoundCloud ; risque de suspension de compte, rate-limiting agressif, ou bannissement IP.",
+        "L'oauth_token de session web expire et est lié à la session navigateur : il faudra le re-coller régulièrement (pas de refresh automatique propre comme avec un vrai flow OAuth app).",
+        "PKCE étant obligatoire et nécessitant client_secret pour l'échange côté serveur, un vrai flow utilisateur ne peut pas être fait proprement 100% côté client sans backend.",
+        "Distinction publique/privée non garantie : un profil peut masquer ses likes ; certains endpoints renvoient 401/403 selon les réglages de confidentialité de l'utilisateur même avec client_id valide.",
+        "Source apidog/gist communautaires : fiabilité variable, vérifier en live le comportement réel des endpoints avant intégration."
+      ],
+      "sources": [
+        "https://developers.soundcloud.com/docs/api/register-app",
+        "https://developers.soundcloud.com/docs/api/guide",
+        "https://developers.soundcloud.com/blog/oauth-migration/",
+        "https://github.com/giantflags/soundcloud-oauth-generator",
+        "https://github.com/music-assistant/SoundcloudPy",
+        "https://gist.github.com/JBou/0538a57df21a2b3479c152ab7d4601e7",
+        "https://developers.soundcloud.com/docs/api/explorer/open-api",
+        "https://github.com/soundcloud/api/issues/145",
+        "https://github.com/soundcloud/api/issues/513",
+        "https://www.npmjs.com/package/soundcloud.ts",
+        "https://7ccka7c288.apidog.io/api-3538487"
+      ]
+    },
+    {
+      "facet": "Lecture/résolution d'un flux audio Mixcloud sans yt-dlp (API REST + GraphQL + déchiffrement XOR), méthode 2026",
+      "summary": "Mixcloud expose deux surfaces. (1) Une API REST publique api.mixcloud.com/{user}/{slug}/ qui ne renvoie QUE des métadonnées (titre, durée, pochette, tags) — jamais l'URL de stream. (2) Une API GraphQL (endpoint actuel 2026 : https://app.mixcloud.com/graphql) qui, dans le champ cloudcast.streamInfo, fournit trois URLs candidates : url (HTTP progressif), hlsUrl (manifeste HLS m3u8) et dashUrl (manifeste DASH mpd). Chacune est obfusquée : elle est encodée en base64 PUIS XORée avec la clé ASCII répétée \"IFYOUWANTTHEARTISTSTOGETPAIDDONOTDOWNLOADFROMMIXCLOUD\". L'algorithme de résolution est donc : appeler GraphQL pour le cloudcast, récupérer streamInfo, pour chaque champ faire base64-decode puis XOR-decrypt avec la clé cyclique, et le résultat est l'URL réelle du segment/manifeste à lire (HLS via lecteur m3u8, DASH via mpd, ou HTTP direct). yt-dlp utilise désormais impersonate=True (TLS browser fingerprint) car l'endpoint app.mixcloud.com bloque les clients non-navigateur. Le XOR est symétrique (même fonction sert à chiffrer/déchiffrer).",
+      "key_facts": [
+        "L'API REST api.mixcloud.com/{user}/{slug}/ renvoie uniquement des METADONNEES JSON (name, url, audio_length, pictures, tags, play_count) — elle ne contient PAS l'URL de stream. Elle sert seulement à valider/enrichir.",
+        "Le stream se récupère via GraphQL. Endpoint 2026 utilisé par yt-dlp : https://app.mixcloud.com/graphql (ancien : www.mixcloud.com/graphql / api.mixcloud.com/graphql).",
+        "La réponse GraphQL contient cloudcast.streamInfo qui expose trois champs candidats : url, hlsUrl, dashUrl. Au moins l'un est présent selon le type de cast (live/exclusif/normal).",
+        "Chaque URL de streamInfo est DOUBLEMENT obfusquée : d'abord encodée en base64, puis le binaire décodé est XORé octet-par-octet avec une clé ASCII répétée en boucle (itertools.cycle).",
+        "Clé de déchiffrement (constante, en clair dans le code) : IFYOUWANTTHEARTISTSTOGETPAIDDONOTDOWNLOADFROMMIXCLOUD (53 caractères ASCII).",
+        "Le XOR est symétrique : la même fonction _decrypt_xor_cipher(key, ciphertext) sert au chiffrement et au déchiffrement.",
+        "hlsUrl déchiffrée -> manifeste .m3u8 (HLS) ; dashUrl déchiffrée -> manifeste .mpd (DASH) ; url déchiffrée -> fichier HTTP progressif direct (format_id 'http').",
+        "yt-dlp passe impersonate=True (usurpation d'empreinte TLS/HTTP de navigateur via curl_cffi) car app.mixcloud.com rejette les requêtes non-navigateur (403/Cloudflare). C'est souvent INDISPENSABLE en 2026.",
+        "Le refactor de l'extractor a eu lieu en avril 2025 (commit db6d1f1) ; l'endpoint et la logique de déchiffrement n'ont pas changé, seul le parsing a été nettoyé avec traverse_obj.",
+        "Les contenus exclusifs/Select renvoient restrictedReason et pas de streamInfo exploitable (DRM/paywall) — non récupérables par cette méthode."
+      ],
+      "code_or_endpoints": [
+        "ETAPE 0 (parse URL) : une URL Mixcloud est de la forme https://www.mixcloud.com/{username}/{slug}/ -> extraire username et slug.",
+        "ETAPE 1 (metadonnees, optionnel) : GET https://api.mixcloud.com/{username}/{slug}/  -> JSON public {name, url, audio_length, pictures, tags, play_count, user{...}}. NE contient PAS le stream.",
+        "ETAPE 2 (requete GraphQL) : POST https://app.mixcloud.com/graphql  avec Content-Type: application/json et un body {\"query\": \"...\"}. yt-dlp construit la query inline (pas de variables GraphQL separees) : '{ %s(lookup: {username: \\\"%s\\\"%s}) { %s } }' % (lookup_key, username, f', slug: \\\"{slug}\\\"' if slug else '', object_fields)",
+        "lookup_key = 'cloudcast' (ou 'user' selon le type). object_fields inclut notamment : audioLength, description, name, owner, picture, publishDate, isExclusive, restrictedReason, id, et CRUCIAL : streamInfo { dashUrl hlsUrl url }",
+        "Exemple de payload minimal fonctionnel : {\"query\":\"{cloudcast(lookup:{username:\\\"USERNAME\\\",slug:\\\"SLUG\\\"}){name isExclusive restrictedReason streamInfo{url hlsUrl dashUrl}}}\"}",
+        "ETAPE 3 (impersonation) : envoyer la requete avec une empreinte navigateur (yt-dlp: impersonate=True via curl_cffi). En pratique ajouter headers navigateur (User-Agent Chrome, Origin: https://www.mixcloud.com, Referer) et idealement un client TLS-impersonant, sinon 403.",
+        "ETAPE 4 (boucle de dechiffrement) : stream_info = data['cloudcast']['streamInfo']; for url_key in ('url','hlsUrl','dashUrl'): format_url = stream_info.get(url_key); if not format_url: continue; decrypted = decrypt_xor(KEY, base64.b64decode(format_url))",
+        "ALGO XOR (Python verbatim yt-dlp) : _DECRYPTION_KEY = 'IFYOUWANTTHEARTISTSTOGETPAIDDONOTDOWNLOADFROMMIXCLOUD' ; @staticmethod def _decrypt_xor_cipher(key, ciphertext): return ''.join([chr(compat_ord(ch) ^ compat_ord(k)) for ch, k in zip(ciphertext, itertools.cycle(key))])",
+        "ETAPE 5 (routage par type) : if url_key=='hlsUrl' -> _extract_m3u8_formats(decrypted) (lecteur HLS) ; elif url_key=='dashUrl' -> _extract_mpd_formats(decrypted) (lecteur DASH) ; else (url) -> format HTTP direct {'format_id':'http','url':decrypted}.",
+        "Equivalent JS du dechiffrement : const KEY='IFYOUWANTTHEARTISTSTOGETPAIDDONOTDOWNLOADFROMMIXCLOUD'; const raw=atob(encrypted); let out=''; for(let i=0;i<raw.length;i++){ out+=String.fromCharCode(raw.charCodeAt(i) ^ KEY.charCodeAt(i%KEY.length)); } // out = URL reelle",
+        "ETAPE 6 (lecture) : passer l'URL m3u8/mpd/http dechiffree a ffmpeg / hls.js / dash.js / lecteur natif. Pour HLS : ffmpeg -i 'URL.m3u8' -c copy out.m4a"
+      ],
+      "risks": [
+        "L'endpoint GraphQL a deja change plusieurs fois (api.mixcloud.com/graphql -> www.mixcloud.com/graphql -> app.mixcloud.com/graphql). Verifier l'endpoint courant dans le source yt-dlp avant d'implementer ; il peut encore evoluer.",
+        "impersonate/TLS-fingerprint navigateur est quasi obligatoire en 2026 : sans curl_cffi ou equivalent, app.mixcloud.com renvoie 403 (Cloudflare). Une simple requete requests/fetch nue echoue souvent.",
+        "La clé XOR et tout le mecanisme sont une obfuscation, pas un chiffrement reel. Le contournement est techniquement trivial mais le nom meme de la clé (DONOTDOWNLOADFROMMIXCLOUD) et les CGU Mixcloud indiquent que le telechargement est explicitement interdit — risque legal/CGU, surtout pour du contenu sous licence (musique).",
+        "Les casts exclusifs/Select renvoient restrictedReason et pas de streamInfo lisible (DRM/paywall) : non resolubles par cette methode.",
+        "Le champ object_fields exact et le nom lookup_key (cloudcast vs user) peuvent differer ; copier la requete exacte depuis le source yt-dlp courant evite les erreurs de schema GraphQL.",
+        "Reimplementer hors yt-dlp signifie maintenir soi-meme l'extractor a chaque changement cote Mixcloud ; yt-dlp reste la reference a surveiller (commit db6d1f1, avril 2025)."
+      ],
+      "sources": [
+        "https://raw.githubusercontent.com/yt-dlp/yt-dlp/master/yt_dlp/extractor/mixcloud.py",
+        "https://github.com/yt-dlp/yt-dlp/blob/master/yt_dlp/extractor/mixcloud.py",
+        "https://github.com/yt-dlp/yt-dlp/commit/db6d1f145ad583e0220637726029f8f2fa6200a0",
+        "https://github.com/yt-dlp/yt-dlp/issues/4109",
+        "https://github.com/ytdl-org/youtube-dl/blob/master/youtube_dl/extractor/mixcloud.py",
+        "https://www.mixcloud.com/developers/"
+      ]
+    },
+    {
+      "facet": "Mixcloud API 2026 — accès favoris/playlists/follows (OAuth2 + endpoints publics)",
+      "summary": "L'API Mixcloud reste active et fonctionnelle en juin 2026 (base https://api.mixcloud.com/). Bonne nouvelle décisive : la quasi-totalité des données de listing d'un utilisateur sont PUBLIQUES et accessibles SANS aucune app OAuth ni token — favorites, following, followers, listens, playlists, cloudcasts retournent tous HTTP 200 en GET anonyme. L'OAuth2 (authorize + access_token sur www.mixcloud.com) n'est nécessaire que pour /me/ (savoir qui est l'utilisateur courant) et pour les actions d'écriture (poser/retirer un favori, suivre, uploader). L'OAuth2 Mixcloud n'a pas de scopes granulaires (modèle d'autorisation unique) et ne supporte que le flux browser-based (code → access_token). Pagination double : par défaut cursor temporel (since/until), ou offset/limit ; chaque réponse fournit paging.next / paging.previous prêts à suivre.",
+      "key_facts": [
+        "Base API : https://api.mixcloud.com/ (HTTPS). Le site web racine est www.mixcloud.com.",
+        "OAuth2 TOUJOURS ACTIF en 2026, mais flux browser-based uniquement, et SANS scopes granulaires (pas de paramètre scope documenté — autorisation tout-ou-rien quand l'utilisateur clique Allow).",
+        "ÉNORME pour ton cas : GET /{user}/favorites/, /{user}/following/, /{user}/followers/, /{user}/listens/, /{user}/playlists/, /{user}/cloudcasts/ fonctionnent SANS auth (testés en live → HTTP 200). Tu peux donc lire TES propres favoris/follows publics juste avec ton nom d'utilisateur, sans créer d'app OAuth.",
+        "Token REQUIS uniquement pour : GET /me/ (retourne 400 OAuthException 'An access_token is required' sans token) et toutes les écritures (favorite/follow/upload).",
+        "Le token s'envoie en query string : ?access_token=YOUR_TOKEN (ou en header Authorization: Bearer). Mixcloud documente le passage en query param.",
+        "Pagination par défaut = cursor temporel : paging.next contient &until=YYYY-MM-DD+HH:MM:SS (URL-encodé), paging.previous contient &since=...  Suivre simplement paging.next jusqu'à absence de clé next.",
+        "Pagination offset alternative supportée : ?limit=N&offset=M → paging.next/previous repassent alors en offset. limit max usuel 100 (défaut 20).",
+        "Réponse de liste = {\"data\": [...], \"paging\": {\"next\":..., \"previous\":...}, \"name\":...}. Si pas de page suivante, paging est null/absent.",
+        "Chaque item de favorites/cloudcasts a une 'key' (ex: /spartacus/show-name/) et 'url' ; following/followers donnent des objets user avec key /{user}/.",
+        "Le profil /{user}/ renvoie HTTP 301 (redirige vers /{user} avec slash final canonique) — gérer le suivi de redirection."
+      ],
+      "code_or_endpoints": [
+        "OAuth authorize : https://www.mixcloud.com/oauth/authorize?client_id=CLIENT_ID&redirect_uri=REDIRECT_URI  (l'utilisateur se logue et autorise → redirige vers REDIRECT_URI?code=OAUTH_CODE)",
+        "OAuth access_token : https://www.mixcloud.com/oauth/access_token?client_id=CLIENT_ID&redirect_uri=REDIRECT_URI&client_secret=CLIENT_SECRET&code=OAUTH_CODE  → renvoie access_token=YOUR_ACCESS_TOKEN",
+        "Utilisateur courant (AUTH requise) : GET https://api.mixcloud.com/me/?access_token=TOKEN  (sans token → 400 OAuthException)",
+        "TES favoris (PUBLIC, sans auth) : GET https://api.mixcloud.com/{user}/favorites/?limit=100",
+        "TES follows (PUBLIC) : GET https://api.mixcloud.com/{user}/following/?limit=100  | followers : /{user}/followers/",
+        "TES écoutes (PUBLIC) : GET https://api.mixcloud.com/{user}/listens/?limit=100",
+        "TES playlists (PUBLIC) : GET https://api.mixcloud.com/{user}/playlists/  puis contenu : GET https://api.mixcloud.com/{user}/playlists/{slug}/cloudcasts/",
+        "Tes uploads (PUBLIC) : GET https://api.mixcloud.com/{user}/cloudcasts/?limit=100",
+        "Variante /me/ + sous-ressource avec token : GET https://api.mixcloud.com/me/favorites/?access_token=TOKEN  et /me/following/, /me/listens/ (équivalent authentifié sans avoir à connaître le username)",
+        "Pagination cursor (défaut) : suivre response.paging.next (contient &until=...) jusqu'à ce que paging.next soit absent.",
+        "Pagination offset : ?limit=20&offset=20&offset=40...  Algorithme : tant que data non vide ET paging.next présent, GET paging.next.",
+        "ÉCRITURE favori (AUTH) : POST https://api.mixcloud.com/{user}/{cloudcast}/favorite/?access_token=TOKEN  ; retirer : DELETE même URL",
+        "ÉCRITURE follow (AUTH) : POST https://api.mixcloud.com/{user}/follow/?access_token=TOKEN ; DELETE pour unfollow",
+        "Recherche (PUBLIC) : GET https://api.mixcloud.com/search/?q=QUERY&type=cloudcast|user|tag"
+      ],
+      "risks": [
+        "Le 'public' dépend de la visibilité du compte : un profil/favori marqué privé ne sortira pas en GET anonyme — dans ce cas seul l'OAuth + /me/ y donne accès.",
+        "OAuth2 sans scopes : l'app reçoit une autorisation large ; pas de granularité read-only vs write à attendre.",
+        "Flux OAuth uniquement browser-based : pas de client_credentials ni device flow documenté → nécessite une redirection navigateur + serveur pour capter le code (compliqué pour un script CLI pur ; contourner via endpoints publics quand possible).",
+        "Rate limiting non documenté précisément ; l'API peut throttler (HTTP 403/429) en cas de pagination massive — espacer les requêtes.",
+        "La doc officielle (help.mixcloud.com, /developers/) est laconique et n'énumère pas tous les endpoints de listing ; ils existent et fonctionnent (vérifiés en live) mais ne sont pas formellement garantis/contractuels → risque de changement non annoncé.",
+        "Format de cursor 'until/since' avec espace et ':' URL-encodés : ne pas reconstruire la query à la main, réutiliser tel quel paging.next.",
+        "publicapi.dev renvoie 403 au scraping mais reste une source secondaire ; me fier à la doc officielle + tests live.",
+        "/{user}/ renvoie 301 — un client HTTP doit suivre les redirections sinon réponse vide."
+      ],
+      "sources": [
+        "https://www.mixcloud.com/developers/",
+        "https://help.mixcloud.com/hc/en-us/articles/360004185139-How-do-I-use-the-Mixcloud-API-",
+        "https://aiomixcloud.readthedocs.io/en/latest/usage.html",
+        "https://python-social-auth.readthedocs.io/en/latest/backends/mixcloud.html",
+        "https://github.com/Beatnode/mixcloud",
+        "https://api.mixcloud.com/ (tests live: /{user}/favorites,following,followers,listens,playlists,cloudcasts → 200 ; /me/ → 400 sans token)"
+      ]
+    },
+    {
+      "facet": "Benchmark UX/design des meilleurs lecteurs audio TUI pour inspirer une TUI ratatui cliquable (souris)",
+      "summary": "J'ai analysé six lecteurs audio TUI de référence. Deux profils se dégagent: les classiques vim-centric (ncmpcpp, cmus, musikcube) qui imposent un layout multi-vues commutables par touches numériques 1-7 et une queue séparée first-class; et les TUI Rust modernes (spotify-player/ratatui, jellyfin-tui/ratatui, ncspot/cursive, spotify-tui) qui ajoutent popups, command palette type-Vim (`:`), thèmes RGB hot-reload et un support souris naissant. Le support souris reste le maillon faible partout: seul spotify-player documente un clic (seek sur la barre de progression), musikcube et ncspot ont une souris partielle, les autres sont clavier-only. Pour une TUI ratatui cliquable, les patterns gagnants à reprendre sont: layout sidebar(library)+table centrale+now-playing bottom-bar, queue comme vue dédiée avec réordonnancement, command palette `:` fuzzy, thèmes par fichier avec 25+ clés couleur et hot-reload, et un overlay d'aide `?` qui liste/recherche tous les raccourcis. La souris est un avantage différenciant car aucun concurrent ne la traite vraiment comme citoyen de première classe.",
+      "key_facts": [
+        "spotify-player (aome510, Rust/ratatui): le plus proche de la cible. Layout = sidebar library (playlists/artistes/albums saved) + tables triables (title/artist/album/date/duration) + playback window bas avec visualiseur audio 64 bandes log. Souris = clic gauche sur la barre de progression pour seek (SEUL clic documenté de tout le panel). Repo: github.com/aome510/spotify-player",
+        "spotify-player raccourcis signature: space play/pause, n/p next/prev, +/- volume, >/< seek, j/k nav vim avec counts, C-f/C-b page, gg/G top/bottom, / search-in-page, ? ou C-h aide (searchable), tab/backtab switch window, D device popup, T theme switcher popup, z Queue, a actions sur track courant, C-space actions context-menu sur item, Z/C-z add-to-queue, l/gL lyrics. Tous remappables via keymaps.",
+        "spotify-player = modèle de 'command system': chaque action est une Command nommée (BrowseUserPlaylists=`u p` chord, SwitchTheme=`T`, ShowActionsOnSelectedItem=`C-space`) bindable. Popups partout (device, theme, actions, browse). CLI miroir: get/playback/search/connect/like/playlist. Fuzzy search optionnel via feature fzf.",
+        "ncmpcpp (MPD client, C++): référence ergonomie historique. Layout colonnes configurable (Playlist/Browser/Search/Editor), visualiseur spectre (fftw), navigation vim ULTRA-granulaire: [ ] saut par album, { } saut par artiste, Page Up/Down. Aide = touche 1. Bindings via fichier ~/.ncmpcpp/bindings (l'ancien 'keys' deprecated). Pattern fort: sauts sémantiques (album/artiste) au-delà du j/k ligne-à-ligne.",
+        "cmus (C): pattern QUEUE first-class + 7 vues commutables par 1-7. Vue 1 library arbre artist/album, 2 sorted list, 3 playlist, 4 QUEUE (FIFO, joue avant library/playlist), 5 browser fichiers, 6 filters, 7 settings (raccourcis éditables in-app: enter=rebind, space=toggle, D=delete binding). Queue: e=enqueue, p/P=réordonner, shift-D=remove. Pattern: vue settings éditable en direct + queue comme contexte de lecture distinct de la playlist.",
+        "musikcube (C++): vues 1-5, search-bar en HAUT catégorisant library par albums/artistes/genre, thème/font/color-scheme changeables depuis page Settings (UI in-app, pas seulement fichier). Souris PARTIELLE: sélection d'options, contrôles volume et playback pilotables à la souris. Très user-friendly malgré le terminal. Repo: github.com/clangen/musikcube",
+        "jellyfin-tui (dhonus, Rust/RATATUI) — meilleur template moderne ratatui. Layout: sidebar nav (Artists/Albums/Tracks) + panel central hiérarchique + pane queue + now-playing avec cover art (ratatui-image/sixel) + panel lyrics auto-scroll. Double-queue style Spotify (current + upcoming), e=enqueue, shift+enter=queue-to-back, d=download, R=repeat cycle, Ctrl+S global shuffle. Thèmes: Light/Dark/Monochrome/Gruvbox + custom HOT-RELOAD + extraction couleur depuis cover art, 25+ clés couleur overridables. / search local + onglet Search global. Repo: github.com/dhonus/jellyfin-tui",
+        "ncspot (hrkfdn, Rust/Cursive): meilleur exemple de COMMAND PALETTE. `:` ouvre prompt Vim, Esc ferme. Commandes: focus <screen> (queue/search/library/cover), move <dir> <step>, search <query>, repeat/shuffle, clear (vider queue), newplaylist, sort <key> [dir], add/save, share, exec <shell cmd>, reload, noop (désactive un défaut). Vues F1 queue / F2 search / F3 library. Souris partielle ajoutée récemment + IPC socket Unix JSON pour remote. Repo: github.com/hrkfdn/ncspot",
+        "spotify-tui (Rigellute, Rust — ARCHIVÉ/non-maintenu mais design influent): multi-panes actif/inactif, config.yml, thème via 14+ params couleur acceptant RGB '255,255,255' OU références aux couleurs du thème terminal. PAS de souris. Raccourcis: A jump-to-album, Shift+A jump-to-artist-album, C/Shift+C copy url, V audio analysis, Z add-to-queue. Repo: github.com/Rigellute/spotify-tui",
+        "CONSTAT SOURIS transversal: le clic est le point faible de tout l'écosystème. spotify-player=seek bar uniquement; musikcube/ncspot=souris partielle non documentée finement; ncmpcpp/cmus/spotify-tui/jellyfin-tui=clavier-only. => Une TUI ratatui pleinement cliquable (rows, boutons playback, onglets, scrollbar drag, seek bar) serait différenciante."
+      ],
+      "code_or_endpoints": [
+        "PATTERN LAYOUT gagnant (à reprendre): 3 zones ratatui — gauche: sidebar/library (Tabs ou List: Playlists/Artists/Albums/Tracks) ; centre: Table triable des pistes (colonnes title/artist/album/duration, tri cliquable sur header) ; bas: now-playing bar (titre + progress Gauge cliquable pour seek + boutons prev/play/next/volume). Optionnel droite: queue pane.",
+        "PATTERN QUEUE first-class (cmus/jellyfin/ncspot): queue = vue/pane DÉDIÉ distinct de la playlist courante. Actions clés à mapper: enqueue (e), add-to-back (shift+enter), remove (shift-D/D), reorder up/down (p/P ou C-k/C-j), clear-all (commande `clear` / C). Modèle double-queue Spotify (now+next).",
+        "PATTERN COMMAND PALETTE (ncspot/spotify-player): touche `:` ouvre un prompt type-Vim, Esc ferme ; chaque action = Command NOMMÉE bindable (focus<screen>, search<q>, sort<key>, shuffle, repeat, theme). Fuzzy match. Doubler d'un overlay aide `?` listant ET recherchant tous les bindings (pattern 'searchable help' de spotify-player + cmus settings-view éditable).",
+        "PATTERN NAV vim + sauts sémantiques (ncmpcpp): j/k ligne, mais aussi [ ]=album précédent/suivant, { }=artiste, gg/G top/bottom, C-f/C-b page, j/k acceptant un COUNT préfixe (3j). tab/backtab pour cycler les panes/windows.",
+        "PATTERN THEMING (jellyfin-tui/spotify-player): thème par fichier avec 20-25+ clés couleur (background, primary/secondary, border active/inactive, title, playing, progress, scrollbar, error). Accepter RGB 'r,g,b' ET refs couleurs terminal (spotify-tui). HOT-RELOAD au save (jellyfin) + commande `reload`/`T` theme-switcher popup. Bonus: extraction palette depuis cover art.",
+        "PATTERN SOURIS à implémenter en ratatui (crossterm MouseEvent): hit-testing par Rect — clic ligne de table=select+lecture sur double, clic header colonne=tri, clic+drag sur Gauge progress=seek (déjà fait par spotify-player), clic boutons playback bottom-bar, clic onglets sidebar pour focus, molette=scroll liste, drag scrollbar. C'est le différenciateur vs tous les concurrents."
+      ],
+      "risks": [
+        "spotify-tui (Rigellute) est non/peu maintenu — s'en inspirer pour le design mais ne pas le prendre comme base de code vivante; spotify-player (aome510) est le successeur actif et plus pertinent.",
+        "ncspot utilise Cursive, pas ratatui — ses patterns command-palette/IPC sont transférables mais pas son code de rendu.",
+        "Le support souris dans ratatui demande de gérer soi-même le hit-testing (mapping MouseEvent x/y -> Rect de chaque widget); ratatui ne fournit pas de routing souris natif, d'où la rareté des TUI cliquables. Prévoir une couche de zones cliquables.",
+        "ncmpcpp/cmus sont des clients MPD ou lecteurs locaux: leur ergonomie queue/library est excellente à copier mais leur stack C/C++ n'est pas réutilisable en Rust.",
+        "Détails fins du support souris musikcube/ncspot non documentés précisément dans les sources publiques — à vérifier en testant les binaires si la parité souris est un objectif.",
+        "Les raccourcis cités sont les DÉFAUTS; tous ces players les rendent remappables — concevoir dès le départ un système de keymap/command nommée plutôt que des bindings codés en dur."
+      ],
+      "sources": [
+        "https://github.com/aome510/spotify-player",
+        "https://github.com/Rigellute/spotify-tui",
+        "https://github.com/clangen/musikcube",
+        "https://github.com/dhonus/jellyfin-tui",
+        "https://github.com/hrkfdn/ncspot",
+        "https://github.com/hrkfdn/ncspot/blob/main/doc/users.md",
+        "https://man.archlinux.org/man/extra/ncmpcpp/ncmpcpp.1.en",
+        "https://github.com/cmus/cmus/blob/master/Doc/cmus-tutorial.txt",
+        "https://man.archlinux.org/man/cmus.1.en",
+        "https://github.com/ratatui/awesome-ratatui",
+        "https://lib.rs/crates/spotify_player"
+      ]
+    }
+  ],
+  "verified": []
+}
