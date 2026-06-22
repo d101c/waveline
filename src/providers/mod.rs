@@ -108,9 +108,52 @@ pub fn resolve_url(
     }
 }
 
+/// Recherche unifiée : interroge les deux plateformes et entrelace les
+/// résultats (best-effort — l'échec d'une plateforme n'empêche pas l'autre).
+pub fn search_all(agent: &ureq::Agent, query: &str, per_platform: u32) -> Vec<Track> {
+    let sc = soundcloud::search(agent, query, per_platform).unwrap_or_default();
+    let mc = mixcloud::search(agent, query, per_platform).unwrap_or_default();
+    interleave(sc, mc)
+}
+
+/// Alterne les éléments de deux listes (a0, b0, a1, b1, …).
+fn interleave(a: Vec<Track>, b: Vec<Track>) -> Vec<Track> {
+    let mut out = Vec::with_capacity(a.len() + b.len());
+    let (mut ai, mut bi) = (a.into_iter(), b.into_iter());
+    loop {
+        match (ai.next(), bi.next()) {
+            (Some(x), Some(y)) => {
+                out.push(x);
+                out.push(y);
+            }
+            (Some(x), None) => out.push(x),
+            (None, Some(y)) => out.push(y),
+            (None, None) => break,
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entrelace_deux_listes() {
+        let mk = |p, n: &str| Track {
+            platform: p,
+            id: n.into(),
+            title: n.into(),
+            artist: "a".into(),
+            permalink: "u".into(),
+            duration_ms: None,
+        };
+        let a = vec![mk(Platform::SoundCloud, "s1"), mk(Platform::SoundCloud, "s2")];
+        let b = vec![mk(Platform::Mixcloud, "m1")];
+        let r = interleave(a, b);
+        let titles: Vec<_> = r.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, ["s1", "m1", "s2"]);
+    }
 
     #[test]
     fn detecte_la_plateforme() {

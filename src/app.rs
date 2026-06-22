@@ -76,6 +76,18 @@ pub enum Input {
     Normal,
     /// Saisie d'une URL à lire (déclenchée par `:`).
     Command(String),
+    /// Saisie d'une requête de recherche (déclenchée par `/`).
+    Search(String),
+}
+
+impl Input {
+    /// Tampon de saisie mutable, quel que soit le mode actif.
+    fn buffer_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Input::Command(s) | Input::Search(s) => Some(s),
+            Input::Normal => None,
+        }
+    }
 }
 
 /// État de lecture affiché (resynchronisé depuis le moteur audio).
@@ -96,6 +108,7 @@ pub enum Effect {
     Toggle,
     Stop,
     SetVolume(u8),
+    Search(String),
 }
 
 /// Intentions de haut niveau, indépendantes du clavier/souris.
@@ -317,14 +330,18 @@ impl App {
         self.input = Input::Command(String::new());
     }
 
+    pub fn begin_search(&mut self) {
+        self.input = Input::Search(String::new());
+    }
+
     pub fn input_push(&mut self, c: char) {
-        if let Input::Command(s) = &mut self.input {
+        if let Some(s) = self.input.buffer_mut() {
             s.push(c);
         }
     }
 
     pub fn input_pop(&mut self) {
-        if let Input::Command(s) = &mut self.input {
+        if let Some(s) = self.input.buffer_mut() {
             s.pop();
         }
     }
@@ -333,24 +350,53 @@ impl App {
         self.input = Input::Normal;
     }
 
-    /// Valide la saisie courante ; renvoie un effet de lecture si pertinent.
+    /// Valide la saisie courante ; renvoie l'effet correspondant (lecture d'URL
+    /// ou recherche), ou `None` si la saisie est vide/invalide.
     pub fn input_submit(&mut self) -> Option<Effect> {
-        let effect = if let Input::Command(s) = &self.input {
-            let url = s.trim().to_string();
-            if url.is_empty() {
-                None
-            } else if crate::providers::platform_of(&url).is_some() {
-                self.status = "Chargement…".to_string();
-                Some(Effect::Play(url))
-            } else {
-                self.status = "URL non reconnue (SoundCloud ou Mixcloud)".to_string();
-                None
+        let effect = match &self.input {
+            Input::Command(s) => {
+                let url = s.trim().to_string();
+                if url.is_empty() {
+                    None
+                } else if crate::providers::platform_of(&url).is_some() {
+                    self.status = "Chargement…".to_string();
+                    Some(Effect::Play(url))
+                } else {
+                    self.status = "URL non reconnue (SoundCloud ou Mixcloud)".to_string();
+                    None
+                }
             }
-        } else {
-            None
+            Input::Search(s) => {
+                let q = s.trim().to_string();
+                if q.is_empty() {
+                    None
+                } else {
+                    self.status = format!("Recherche : « {q} »…");
+                    Some(Effect::Search(q))
+                }
+            }
+            Input::Normal => None,
         };
         self.input = Input::Normal;
         effect
+    }
+
+    /// Remplace la liste par des résultats de recherche.
+    pub fn set_results(&mut self, tracks: Vec<Track>) {
+        let n = tracks.len();
+        self.tracks = tracks;
+        self.list_index = 0;
+        self.focus = Focus::List;
+        self.section = Section::Search;
+        self.section_index = Section::ALL
+            .iter()
+            .position(|s| *s == Section::Search)
+            .unwrap_or(0);
+        self.status = if n == 0 {
+            "Aucun résultat".to_string()
+        } else {
+            format!("{n} résultats")
+        };
     }
 }
 

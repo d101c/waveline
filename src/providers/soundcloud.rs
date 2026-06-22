@@ -134,6 +134,33 @@ fn extract_client_id(js: &str) -> Option<String> {
     None
 }
 
+/// Recherche de morceaux (mode public, sans compte).
+pub fn search(
+    agent: &ureq::Agent,
+    query: &str,
+    limit: u32,
+) -> Result<Vec<Track>, ProviderError> {
+    let cid = client_id(agent)?;
+    let v: Value = agent
+        .get(&format!("{API}/search/tracks"))
+        .query("q", query)
+        .query("client_id", &cid)
+        .query("limit", &limit.to_string())
+        .call()
+        .map_err(HttpError::from)?
+        .into_json()
+        .map_err(|e| ProviderError::Http(HttpError::Decode(e.to_string())))?;
+    let items = v
+        .get("collection")
+        .and_then(|c| c.as_array())
+        .ok_or_else(|| ProviderError::Malformed("recherche sans collection".into()))?;
+    Ok(items
+        .iter()
+        .filter(|t| t.get("kind").and_then(|k| k.as_str()) == Some("track"))
+        .filter_map(|t| track_from_json(t).ok())
+        .collect())
+}
+
 /// Résout une URL SoundCloud vers (Track, flux jouable).
 pub fn resolve(agent: &ureq::Agent, url: &str) -> Result<(Track, StreamSource), ProviderError> {
     let cid = client_id(agent)?;

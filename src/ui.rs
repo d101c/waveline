@@ -331,26 +331,36 @@ fn draw_playbar(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut R
 }
 
 fn draw_status(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    // En mode saisie : invite « : » + tampon + curseur.
-    if let Input::Command(buf) = &app.input {
+    // En mode saisie : invite (« : » URL ou « / » recherche) + tampon + curseur.
+    let prompt_hint = match &app.input {
+        Input::Command(buf) => Some((
+            ":",
+            buf,
+            "colle une URL SoundCloud/Mixcloud · entrée pour jouer · échap pour annuler",
+        )),
+        Input::Search(buf) => Some((
+            "/",
+            buf,
+            "tape ta recherche · entrée pour chercher · échap pour annuler",
+        )),
+        Input::Normal => None,
+    };
+    if let Some((prompt, buf, hint)) = prompt_hint {
         let line = Line::from(vec![
             Span::styled(
-                " : ",
+                format!(" {prompt} "),
                 Style::default().fg(theme.bg).bg(theme.accent).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!(" {buf}▏"),
                 Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                "  (colle une URL SoundCloud/Mixcloud · entrée pour jouer · échap pour annuler)",
-                Style::default().fg(theme.dim),
-            ),
+            Span::styled(format!("  ({hint})"), Style::default().fg(theme.dim)),
         ]);
         f.render_widget(Paragraph::new(line), area);
         return;
     }
-    let keys = "[space] play  [n/p] suiv/préc  [:] url  [tab] focus  [1·2·3] filtre  [?] aide  [q] quitter";
+    let keys = "[space] play  [n/p] suiv/préc  [:] url  [/] rech  [tab] focus  [1·2·3] filtre  [?] quitter:q";
     let line = Line::from(vec![
         Span::styled(format!(" {} ", app.status), Style::default().fg(theme.fg)),
         Span::styled(format!("  {keys}"), Style::default().fg(theme.dim)),

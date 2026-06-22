@@ -44,6 +44,14 @@ fn main() -> io::Result<()> {
         Some("play") => {
             return debug_play(args.get(2).map(|s| s.as_str()), args.get(3).map(|s| s.as_str()))
         }
+        Some("search") => {
+            let q = args[2..].join(" ");
+            let agent = http::agent();
+            for t in providers::search_all(&agent, &q, 8) {
+                println!("[{}] {} — {} ({})", t.platform.tag(), t.artist, t.title, t.duration_human());
+            }
+            return Ok(());
+        }
         _ => {}
     }
 
@@ -62,9 +70,22 @@ fn run(terminal: &mut Tui, app: &mut App, theme: &Theme) -> io::Result<()> {
     let player = Player::new(app.playback.volume);
     let mut regions = Regions::default();
     let mut last_finished = player.shared().finished_generation.load(Ordering::Relaxed);
+    let mut search_rx: Option<std::sync::mpsc::Receiver<Vec<Track>>> = None;
 
     while !app.should_quit {
         sync_playback(app, &player);
+
+        // Résultats de recherche prêts ?
+        if let Some(rx) = &search_rx {
+            match rx.try_recv() {
+                Ok(tracks) => {
+                    app.set_results(tracks);
+                    search_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => search_rx = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
 
         // Enchaînement automatique quand un morceau se termine.
         let fin = player.shared().finished_generation.load(Ordering::Relaxed);
@@ -93,11 +114,25 @@ fn run(terminal: &mut Tui, app: &mut App, theme: &Theme) -> io::Result<()> {
                 _ => None,
             };
             if let Some(eff) = effect {
-                exec(&player, eff);
+                match eff {
+                    Effect::Search(q) => search_rx = Some(spawn_search(q)),
+                    other => exec(&player, other),
+                }
             }
         }
     }
     Ok(())
+}
+
+/// Lance une recherche unifiée dans un thread ; le résultat arrive par le canal.
+fn spawn_search(query: String) -> std::sync::mpsc::Receiver<Vec<Track>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let agent = http::agent();
+        let results = providers::search_all(&agent, &query, 20);
+        let _ = tx.send(results);
+    });
+    rx
 }
 
 /// Exécute un effet sur le moteur audio.
@@ -107,6 +142,8 @@ fn exec(player: &Player, effect: Effect) {
         Effect::Toggle => player.toggle(),
         Effect::Stop => player.stop(),
         Effect::SetVolume(v) => player.set_volume(v),
+        // La recherche est interceptée en amont (lance un thread) ; jamais ici.
+        Effect::Search(_) => {}
     }
 }
 
@@ -131,8 +168,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<Effect> {
     if key.kind != KeyEventKind::Press {
         return None;
     }
-    // En mode saisie, les touches alimentent la ligne de commande.
-    if matches!(app.input, Input::Command(_)) {
+    // En mode saisie (URL ou recherche), les touches alimentent la ligne.
+    if !matches!(app.input, Input::Normal) {
         return match key.code {
             KeyCode::Esc => {
                 app.input_cancel();
@@ -175,6 +212,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<Effect> {
         KeyCode::Char('3') => Some(Action::FilterMixcloud),
         KeyCode::Char(':') => {
             app.begin_command();
+            None
+        }
+        KeyCode::Char('/') => {
+            app.begin_search();
             None
         }
         KeyCode::Char('?') => {

@@ -8,6 +8,49 @@ use crate::http::HttpError;
 use crate::model::{Platform, Track};
 
 const GRAPHQL: &str = "https://www.mixcloud.com/graphql";
+const REST: &str = "https://api.mixcloud.com";
+
+/// Recherche de cloudcasts (mode public, sans compte) via l'API REST.
+pub fn search(
+    agent: &ureq::Agent,
+    query: &str,
+    limit: u32,
+) -> Result<Vec<Track>, ProviderError> {
+    let v: Value = agent
+        .get(&format!("{REST}/search/"))
+        .query("q", query)
+        .query("type", "cloudcast")
+        .query("limit", &limit.to_string())
+        .call()
+        .map_err(HttpError::from)?
+        .into_json()
+        .map_err(|e| ProviderError::Http(HttpError::Decode(e.to_string())))?;
+    let items = v
+        .get("data")
+        .and_then(|d| d.as_array())
+        .ok_or_else(|| ProviderError::Malformed("recherche sans data".into()))?;
+    Ok(items.iter().filter_map(track_from_rest).collect())
+}
+
+/// Construit un Track depuis un objet cloudcast de l'API REST.
+fn track_from_rest(c: &Value) -> Option<Track> {
+    let key = c.get("key").and_then(|k| k.as_str())?; // ex: "/user/slug/"
+    let title = c.get("name").and_then(|n| n.as_str())?.to_string();
+    let artist = c
+        .pointer("/user/name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("Inconnu")
+        .to_string();
+    let duration_ms = c.get("audio_length").and_then(|d| d.as_u64()).map(|s| s * 1000);
+    Some(Track {
+        platform: Platform::Mixcloud,
+        id: key.to_string(),
+        title,
+        artist,
+        permalink: format!("https://www.mixcloud.com{key}"),
+        duration_ms,
+    })
+}
 
 /// Clé XOR (en clair) appliquée après décodage base64 des URLs de flux.
 const KEY: &[u8] = b"IFYOUWANTTHEARTISTSTOGETPAIDDONOTDOWNLOADFROMMIXCLOUD";
