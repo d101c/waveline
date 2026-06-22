@@ -20,6 +20,7 @@
 **Disponible maintenant** (Linux x86_64/aarch64) :
 
 ```sh
+npx waveline                                            # essai immédiat (Node ≥ 14)
 cargo install waveline                                  # depuis crates.io
 cargo binstall waveline                                 # binaire pré-compilé, sans build
 brew install d101c/tap/waveline                         # Homebrew (Linuxbrew)
@@ -29,12 +30,7 @@ cargo install --git https://github.com/d101c/waveline   # build depuis les sourc
 Ou télécharge un binaire statique prêt à l'emploi depuis les
 [Releases](https://github.com/d101c/waveline/releases).
 
-**Bientôt** :
-
-```sh
-npx waveline            # dès la publication npm (Node ≥ 14)
-yay -S waveline-bin     # Arch (AUR)
-```
+**Bientôt** : `yay -S waveline-bin` (Arch / AUR).
 
 Détails & étapes de publication : [`docs/PUBLISHING.md`](docs/PUBLISHING.md).
 
