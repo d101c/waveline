@@ -3,9 +3,9 @@
 </p>
 
 <p align="center">
-  <b>Mixcloud &amp; SoundCloud, réunis dans ton terminal.</b><br>
-  TUI cliquable, raccourcis vim, analyseur de spectre, touches média —
-  un binaire Rust autonome (ni <code>mpv</code>, ni <code>yt-dlp</code>, ni Python).
+  <b>Mixcloud &amp; SoundCloud, together in your terminal.</b><br>
+  A clickable TUI, vim keybindings, spectrum analyzer, media keys —
+  a standalone Rust binary (no <code>mpv</code>, no <code>yt-dlp</code>, no Python).
 </p>
 
 <p align="center">
@@ -15,70 +15,72 @@
   <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT">
 </p>
 
-## Installer
+## Install
 
-**Disponible maintenant** (Linux x86_64/aarch64) :
+**Available now** (Linux x86_64/aarch64):
 
 ```sh
-npx waveline                                            # essai immédiat (Node ≥ 14)
-cargo install waveline                                  # depuis crates.io
-cargo binstall waveline                                 # binaire pré-compilé, sans build
+npx waveline                                            # try it right away (Node ≥ 14)
+cargo install waveline                                  # from crates.io
+cargo binstall waveline                                 # pre-built binary, no build step
 brew install d101c/tap/waveline                         # Homebrew (Linuxbrew)
-cargo install --git https://github.com/d101c/waveline   # build depuis les sources
+cargo install --git https://github.com/d101c/waveline   # build from source
 ```
 
-Ou télécharge un binaire statique prêt à l'emploi depuis les
+Or grab a ready-to-run static binary from the
 [Releases](https://github.com/d101c/waveline/releases).
 
-**Bientôt** : `yay -S waveline-bin` (Arch / AUR).
+**Coming soon**: `yay -S waveline-bin` (Arch / AUR).
 
-Détails & étapes de publication : [`docs/PUBLISHING.md`](docs/PUBLISHING.md).
+Details & publishing steps: [`docs/PUBLISHING.md`](docs/PUBLISHING.md).
 
 ```
-┌ waveline ───────────────────────────────────[ Tout  SC  MC ]─┐
-│ ╭ Sources ──────╮ ╭ Recherche · Tout ─────────────────────╮  │
+┌ waveline ───────────────────────────────────[ All   SC  MC ]─┐
+│ ╭ Sources ──────╮ ╭ Search · All ─────────────────────────╮  │
 │ │ ♥  Likes      │ │ ▶ Bonobo — Kerala            3:57  SC  │  │
 │ │ ☰  Playlists  │ │   Ben UFO — Rinse FM set  1:02:11  MC  │  │
 │ │ ◎  Feed       │ │   Four Tet — Two Thousand…   4:10  SC  │  │
-│ │ ⌕  Recherche  │ │   Gilles Peterson — WW Show  2:00  MC  │  │
-│ │ ⧗  Historique │ │   …                                    │  │
-│ │ ▤  File       │ │                                        │  │
+│ │ ⌕  Search     │ │   Gilles Peterson — WW Show  2:00  MC  │  │
+│ │ ⧗  History    │ │   …                                    │  │
+│ │ ▤  Queue      │ │                                        │  │
 │ ╰───────────────╯ ╰────────────────────────────────────────╯  │
 ├───────────────────────────────────────────────────────────────┤
 │ ▶ Bonobo — Kerala        ███████░░░░░░░░  1:48 / 3:57          │
 ╰───────────────────────────────────────────────────────────────╯
 ```
 
-## Pourquoi
+## Why
 
-Mixcloud et SoundCloud sont deux maisons séparées : deux apps, deux onglets,
-deux files d'attente. waveline les réunit dans le terminal — naviguer,
-chercher, et écouter les deux au même endroit, à la souris **ou** au clavier.
+Mixcloud and SoundCloud are two separate homes: two apps, two tabs, two
+queues. waveline brings them together in the terminal — browse, search, and
+listen to both in one place, with the mouse **or** the keyboard.
 
-## Caractéristiques
+## Features
 
-- **Deux plateformes, une interface** — modèle unifié, recherche entrelacée.
-- **Lecture native** — décodage 100 % Rust (`symphonia` : MP3, AAC/MP4), sortie
-  via PipeWire (`pw-play`) ou ALSA (`aplay`). Aucun lecteur externe requis.
-- **Cliquable ET clavier** — clic sur une piste pour jouer, clic sur les onglets
-  de filtre, la barre play/pause ; ou tout au clavier en style vim.
-- **Visualiseurs intégrés, réactifs** — 3 styles cyclés avec `v` : barres de
-  spectre, miroir (« waveline »), oscilloscope. FFT maison ~30 Hz, rendu ~30 fps
-  en lecture, coût CPU négligeable.
-- **Touches média & contrôles du bureau** — via MPRIS (D-Bus) : Play/Pause,
-  Suivant, Précédent, Stop depuis les touches média du clavier, le panneau
-  GNOME et l'écran de verrouillage ; titre/artiste/durée y sont affichés.
-- **Avec et sans compte** — sans login : URLs publiques + recherche. Avec
-  compte : saisis ton **pseudo** SoundCloud/Mixcloud (touche `c`) et tes
-  **Likes / Playlists / Feed** se remplissent depuis les données publiques —
-  aucun OAuth, aucun token, rien de sensible stocké.
-- **Autonome, peu de dépendances** — un binaire, HTTP pur-Rust (`ureq`+rustls),
-  pas de `tokio`, pas d'OpenSSL système, pas de `yt-dlp`.
+- **Two platforms, one interface** — a unified model, interleaved search.
+- **Native playback** — 100% Rust decoding (`symphonia`: MP3, AAC/MP4), output
+  via PipeWire (`pw-play`) or ALSA (`aplay`). No external player required.
+- **Clickable AND keyboard-driven** — click a track to play it, click the
+  filter tabs, the play/pause bar; or drive it entirely with vim-style keys.
+- **Built-in, reactive visualizers** — 3 styles cycled with `v`: spectrum
+  bars, mirror ("waveline"), oscilloscope. A hand-rolled FFT at ~30 Hz,
+  rendered at ~30 fps during playback, negligible CPU cost.
+- **Media keys & desktop controls** — via MPRIS (D-Bus): Play/Pause, Next,
+  Previous, Stop from the keyboard's media keys, the GNOME panel, and the
+  lock screen; title/artist/duration are shown there too.
+- **With or without an account** — no login needed: public URLs + search.
+  With an account: enter your SoundCloud/Mixcloud **handle** (key `c`) and
+  your **Likes / Playlists / Feed** populate from public data — no OAuth, no
+  token, nothing sensitive stored.
+- **Standalone, few dependencies** — a single binary, pure-Rust HTTP
+  (`ureq`+rustls), no `tokio`, no system OpenSSL, no `yt-dlp`.
+- **English by default, French on demand** — switch language with `L` or a
+  click in the sidebar; the choice is remembered across sessions.
 
 ## Installation
 
-Prérequis : Rust ≥ 1.96, et **`pw-play`** (PipeWire) ou **`aplay`** (alsa-utils)
-pour la sortie son — présents sur la plupart des distributions Linux.
+Requirements: Rust ≥ 1.96, and **`pw-play`** (PipeWire) or **`aplay`**
+(alsa-utils) for audio output — available on most Linux distributions.
 
 ```sh
 git clone git@github.com:d101c/waveline.git
@@ -87,86 +89,91 @@ cargo build --release
 ./target/release/waveline
 ```
 
-## Utilisation
+## Usage
 
-Lance `waveline`, puis :
+Launch `waveline`, then:
 
-| Touche | Action | | Touche | Action |
+| Key | Action | | Key | Action |
 |---|---|---|---|---|
-| `j` / `k` ou `↑`/`↓` | naviguer | | `/` | rechercher (SC + MC) |
-| `Entrée` / clic | jouer la sélection | | `:` | coller une URL et jouer |
-| `Espace` | play / pause | | `c` | connecter tes comptes |
-| `n` / `p` | suivant / précédent | | `v` | changer de visualiseur |
-| `s` | stop | | `1` `2` `3` | filtre Tout / SC / MC |
-| `+` / `-` | volume | | `Tab` | changer de panneau |
-| `g` / `G` | haut / bas de liste | | `q` | quitter |
-| | | | `?` | aide |
+| `j` / `k` or `↑`/`↓` | navigate | | `/` | search (SC + MC) |
+| `Enter` / click | play the selection | | `:` | paste a URL and play |
+| `Space` | play / pause | | `c` | connect your accounts |
+| `n` / `p` | next / previous | | `v` | cycle the visualizer |
+| `s` | stop | | `1` `2` `3` | filter All / SC / MC |
+| `+` / `-` | volume | | `Tab` | switch panel |
+| `g` / `G` | top / bottom of list | | `L` | switch language (EN/FR) |
+| | | | `q` | quit |
+| | | | `?` | help |
 
-### Connexion à tes comptes
+### Connecting your accounts
 
-Appuie sur `c`, entre ton **pseudo SoundCloud** (Entrée), puis ton **pseudo
-Mixcloud** (Entrée). Les pseudos sont mémorisés dans
-`~/.config/waveline/config.json`. Active ensuite **Likes**, **Playlists** ou
-**Feed** dans la barre latérale : tes données publiques des deux plateformes y
-sont fusionnées. Aucun mot de passe ni token — uniquement des pseudos publics.
+Press `c`, enter your **SoundCloud handle** (Enter), then your **Mixcloud
+handle** (Enter). Handles are remembered in
+`~/.config/waveline/config.json`. Then open **Likes**, **Playlists**, or
+**Feed** in the sidebar: your public data from both platforms is merged
+there. No password or token — only public handles.
 
-### Modes ligne de commande (debug)
+### Command-line (debug) modes
 
 ```sh
-waveline resolve <url>          # affiche le flux résolu d'une URL
-waveline play <url> [secondes]  # joue le flux N secondes (test moteur)
-waveline search <requête>       # recherche unifiée SC + MC
-waveline lib <likes|playlists|feed> <pseudo_sc|-> <pseudo_mc|->
+waveline resolve <url>          # print the resolved stream for a URL
+waveline play <url> [seconds]   # play the stream for N seconds (engine test)
+waveline search <query>         # unified SC + MC search
+waveline lib <likes|playlists|feed> <sc_handle|-> <mc_handle|->
 ```
 
 ## Architecture
 
 ```
 src/
-├── main.rs         cycle terminal, boucle d'événements, câblage des effets
-├── app.rs          état pur + logique (testable, sans I/O) → émet des Effect
-├── ui.rs           rendu ratatui + cartographie des zones cliquables
-├── model.rs        Track unifié (SoundCloud ⇄ Mixcloud)
-├── providers/      résolution de flux & recherche
-│   ├── soundcloud.rs   client_id scrapé, /resolve, transcodings
-│   ├── mixcloud.rs     GraphQL cloudcastLookup, déchiffrement XOR
-│   └── hls.rs          parsing m3u8
-├── audio/          moteur de lecture
-│   ├── player.rs   thread worker : résolution → décodage → sink
-│   ├── source.rs   sources HTTP progressif / HLS pour symphonia
-│   ├── sink.rs     sortie PCM via pw-play / aplay
-│   └── spectrum.rs FFT radix-2 maison + bandes (analyseur)
-├── config.rs       pseudos de compte (~/.config/waveline)
-├── mpris.rs        serveur MPRIS (D-Bus) : touches média, contrôles bureau
-├── http.rs         agent ureq partagé (UA navigateur)
-└── b64.rs          décodeur base64 (pour le XOR Mixcloud)
+├── main.rs         terminal lifecycle, event loop, effect wiring
+├── app.rs          pure state + logic (testable, no I/O) → emits Effect
+├── ui.rs           ratatui rendering + clickable-zone mapping
+├── i18n.rs         UI language (English default, French on demand)
+├── model.rs        unified Track (SoundCloud ⇄ Mixcloud)
+├── providers/      stream resolution & search
+│   ├── soundcloud.rs   scraped client_id, /resolve, transcodings
+│   ├── mixcloud.rs     GraphQL cloudcastLookup, XOR decryption
+│   └── hls.rs          m3u8 parsing
+├── audio/          playback engine
+│   ├── player.rs   worker thread: resolve → decode → sink
+│   ├── source.rs   progressive HTTP / HLS sources for symphonia
+│   ├── sink.rs     PCM output via pw-play / aplay
+│   └── spectrum.rs hand-rolled radix-2 FFT + bands (analyzer)
+├── config.rs       account handles & language (~/.config/waveline)
+├── mpris.rs        MPRIS server (D-Bus): media keys, desktop controls
+├── http.rs         shared ureq agent (browser UA)
+└── b64.rs          base64 decoder (for the Mixcloud XOR)
 ```
 
-L'`App` ne fait aucun I/O : elle muta son état et renvoie des `Effect`
-(lecture, recherche) que `main.rs` exécute sur le moteur. Le moteur tourne dans
-un thread et publie son état (position, durée, lecture/pause) que l'UI relit à
-chaque frame. Ce découpage rend toute la navigation testable sans terminal.
+`App` performs no I/O: it mutates its state and returns `Effect`s (playback,
+search) that `main.rs` executes on the engine. The engine runs in a thread
+and publishes its state (position, duration, playing/paused) that the UI
+reads back each frame. This split makes all navigation testable without a
+terminal.
 
-## Limites connues
+## Known limitations
 
-- **DRM SoundCloud** : certains titres monétisés majors sont servis en HLS
-  chiffré (Widevine/PlayReady). Ils sont indéchiffrables par tout client tiers ;
-  waveline le signale et passe. La grande majorité du contenu (mixes, podcasts,
-  artistes indépendants, uploads libres) reste jouable.
-- **Mixcloud Select / exclusifs** : contenu restreint non récupérable.
-- Ces APIs sont non officielles et peuvent évoluer ; la résolution est conçue
-  pour échouer proprement plutôt que de planter.
+- **SoundCloud DRM**: some monetized major-label tracks are served as
+  encrypted HLS (Widevine/PlayReady). These can't be decrypted by any
+  third-party client; waveline reports it and moves on. The vast majority of
+  content (mixes, podcasts, independent artists, free uploads) stays
+  playable.
+- **Mixcloud Select / exclusives**: restricted content can't be fetched.
+- These are unofficial APIs and may change; resolution is designed to fail
+  cleanly rather than crash.
 
 ## Roadmap
 
-- [x] Mode **avec compte** par pseudo public (Likes / Playlists / Feed).
-- [x] Analyseur de spectre intégré.
-- [x] Touches média / contrôles bureau via MPRIS (D-Bus).
-- [ ] Likes *privés* SoundCloud via `oauth_token` collé (optionnel, hors CGU).
-- [ ] File d'attente persistante et historique.
-- [ ] Palette de commandes (`Ctrl-P`) et thèmes.
-- [ ] HLS chiffré AES-128 (non-DRM) et préchargement gapless.
+- [x] **Account mode** by public handle (Likes / Playlists / Feed).
+- [x] Built-in spectrum analyzer.
+- [x] Media keys / desktop controls via MPRIS (D-Bus).
+- [x] English/French UI language switch.
+- [ ] *Private* SoundCloud Likes via a pasted `oauth_token` (optional, outside ToS).
+- [ ] Persistent queue and history.
+- [ ] Command palette (`Ctrl-P`) and themes.
+- [ ] Non-DRM AES-128 encrypted HLS and gapless preloading.
 
-## Licence
+## License
 
-MIT — voir [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).
