@@ -7,12 +7,17 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::Lang;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     /// Pseudo SoundCloud (la partie après soundcloud.com/).
     pub soundcloud: Option<String>,
     /// Pseudo Mixcloud.
     pub mixcloud: Option<String>,
+    /// Langue de l'interface (anglais par défaut, absent des anciennes configs).
+    #[serde(default)]
+    pub lang: Lang,
 }
 
 impl Config {

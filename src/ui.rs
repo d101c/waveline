@@ -13,6 +13,7 @@ use ratatui::widgets::{
 use ratatui::Frame;
 
 use crate::app::{App, Filter, Focus, Input, Section};
+use crate::i18n;
 use crate::model::{fmt_duration, Platform};
 use crate::theme::Theme;
 
@@ -28,6 +29,8 @@ pub struct Regions {
     pub list_len: usize,
     /// Bouton play/pause de la barre de lecture.
     pub playpause_btn: Rect,
+    /// Ligne de bascule de langue, en bas de la sidebar.
+    pub lang_btn: Rect,
 }
 
 impl Regions {
@@ -60,6 +63,10 @@ impl Regions {
     pub fn playpause_at(&self, x: u16, y: u16) -> bool {
         contains(&self.playpause_btn, x, y)
     }
+
+    pub fn lang_at(&self, x: u16, y: u16) -> bool {
+        contains(&self.lang_btn, x, y)
+    }
 }
 
 fn contains(r: &Rect, x: u16, y: u16) -> bool {
@@ -75,8 +82,7 @@ pub fn draw(f: &mut Frame, app: &App, theme: &Theme) -> Regions {
     if area.width < 24 || area.height < 14 {
         if area.width >= 1 && area.height >= 1 {
             f.render_widget(
-                Paragraph::new("waveline : agrandis le terminal")
-                    .style(Style::default().fg(theme.fg)),
+                Paragraph::new(i18n::resize_hint(app.lang)).style(Style::default().fg(theme.fg)),
                 area,
             );
         }
@@ -119,11 +125,11 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut Re
     );
     f.render_widget(Paragraph::new(Line::from(title)), area);
 
-    // Onglets de filtre à droite : [Tout] [SC] [MC].
+    // Onglets de filtre à droite : [All/Tout] [SC] [MC].
     let tabs = [
-        ("Tout", Filter::All),
-        ("SC", Filter::Only(Platform::SoundCloud)),
-        ("MC", Filter::Only(Platform::Mixcloud)),
+        (Filter::All.label(app.lang), Filter::All),
+        ("SC".to_string(), Filter::Only(Platform::SoundCloud)),
+        ("MC".to_string(), Filter::Only(Platform::Mixcloud)),
     ];
     // Calcule la largeur totale puis pose les onglets en partant de la droite.
     let labels: Vec<String> = tabs.iter().map(|(t, _)| format!(" {t} ")).collect();
@@ -168,28 +174,36 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut R
                 style = style.fg(theme.accent);
             }
         }
-        let label = format!(" {}", section.label());
+        let label = format!(" {}", section.label(app.lang));
         f.render_widget(Paragraph::new(Span::styled(label, style)), row);
         reg.sidebar_rows.push(row);
     }
 
-    // Comptes connectés, en bas de la sidebar (non cliquables).
-    if inner.height >= 4 {
-        let base = inner.y + inner.height - 3;
+    // Comptes connectés + langue, en bas de la sidebar.
+    if inner.height >= 5 {
+        let base = inner.y + inner.height - 4;
         let sc = app.sc_handle.as_deref().unwrap_or("—");
         let mc = app.mc_handle.as_deref().unwrap_or("—");
         let lines = [
             Span::styled(
-                " comptes  (c)",
+                i18n::accounts_hint(app.lang),
                 Style::default().fg(theme.dim).add_modifier(Modifier::BOLD),
             ),
             Span::styled(format!(" SC {sc}"), Style::default().fg(theme.soundcloud)),
             Span::styled(format!(" MC {mc}"), Style::default().fg(theme.mixcloud)),
+            Span::styled(
+                i18n::lang_hint(app.lang),
+                Style::default().fg(theme.dim).add_modifier(Modifier::BOLD),
+            ),
         ];
         for (k, span) in lines.into_iter().enumerate() {
             let y = base + k as u16;
             if y < inner.y + inner.height {
-                f.render_widget(Paragraph::new(span), Rect::new(inner.x, y, inner.width, 1));
+                let row = Rect::new(inner.x, y, inner.width, 1);
+                f.render_widget(Paragraph::new(span), row);
+                if k == 3 {
+                    reg.lang_btn = row;
+                }
             }
         }
     }
@@ -197,7 +211,11 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut R
 
 fn draw_list(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut Regions) {
     let active = app.focus == Focus::List;
-    let title = format!("{}  ·  {}", app.section.label().trim(), app.filter.label());
+    let title = format!(
+        "{}  ·  {}",
+        app.section.label(app.lang).trim(),
+        app.filter.label(app.lang)
+    );
     let block = panel_block(&title, active, theme);
     let inner = block.inner(area);
     f.render_widget(&block, area);
@@ -208,7 +226,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut Regi
 
     if visible.is_empty() {
         let hint = Paragraph::new(Line::from(Span::styled(
-            "  (vide — colle une URL avec : ou lance une recherche avec /)",
+            i18n::empty_list_hint(app.lang),
             Style::default().fg(theme.dim),
         )));
         f.render_widget(hint, inner);
@@ -312,7 +330,7 @@ fn draw_playbar(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut R
         (
             "⏳",
             Line::from(Span::styled(
-                " ⏳ Chargement…",
+                i18n::loading_playbar(app.lang),
                 Style::default()
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
@@ -343,7 +361,7 @@ fn draw_playbar(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut R
             None => (
                 "·",
                 Line::from(Span::styled(
-                    " Rien en lecture ",
+                    i18n::nothing_playing(app.lang),
                     Style::default().fg(theme.dim),
                 )),
             ),
@@ -502,26 +520,14 @@ fn band_color(i: usize, n: usize) -> ratatui::style::Color {
 fn draw_status(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     // En mode saisie : invite (« : » URL ou « / » recherche) + tampon + curseur.
     let prompt_hint = match &app.input {
-        Input::Command(buf) => Some((
-            ":",
-            buf,
-            "colle une URL SoundCloud/Mixcloud · entrée pour jouer · échap pour annuler",
-        )),
-        Input::Search(buf) => Some((
-            "/",
-            buf,
-            "tape ta recherche · entrée pour chercher · échap pour annuler",
-        )),
-        Input::ConnectSoundCloud(buf) => Some((
-            "SoundCloud",
-            buf,
-            "ton pseudo SoundCloud (vide = aucun) · entrée → Mixcloud · échap annule",
-        )),
-        Input::ConnectMixcloud(buf) => Some((
-            "Mixcloud",
-            buf,
-            "ton pseudo Mixcloud (vide = aucun) · entrée pour valider · échap annule",
-        )),
+        Input::Command(buf) => Some((":", buf, i18n::prompt_command_hint(app.lang))),
+        Input::Search(buf) => Some(("/", buf, i18n::prompt_search_hint(app.lang))),
+        Input::ConnectSoundCloud(buf) => {
+            Some(("SoundCloud", buf, i18n::prompt_connect_sc_hint(app.lang)))
+        }
+        Input::ConnectMixcloud(buf) => {
+            Some(("Mixcloud", buf, i18n::prompt_connect_mc_hint(app.lang)))
+        }
         Input::Normal => None,
     };
     if let Some((prompt, buf, hint)) = prompt_hint {
@@ -542,7 +548,7 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         f.render_widget(Paragraph::new(line), area);
         return;
     }
-    let keys = "[space] play  [n/p] suiv/préc  [:] url  [/] rech  [tab] focus  [1·2·3] filtre  [?] quitter:q";
+    let keys = i18n::keys_bar(app.lang);
     let line = Line::from(vec![
         Span::styled(format!(" {} ", app.status), Style::default().fg(theme.fg)),
         Span::styled(format!("  {keys}"), Style::default().fg(theme.dim)),
@@ -643,7 +649,7 @@ mod tests {
         assert!(text.contains("Sources"), "sidebar absente");
         assert!(text.contains("Likes"), "section Likes absente");
         assert!(text.contains("Mon Morceau Test"), "morceau absent");
-        assert!(text.contains("Rien en lecture"), "barre de lecture absente");
+        assert!(text.contains("Nothing playing"), "barre de lecture absente");
     }
 
     #[test]

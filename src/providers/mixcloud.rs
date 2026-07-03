@@ -24,7 +24,7 @@ pub fn search(agent: &ureq::Agent, query: &str, limit: u32) -> Result<Vec<Track>
     let items = v
         .get("data")
         .and_then(|d| d.as_array())
-        .ok_or_else(|| ProviderError::Malformed("recherche sans data".into()))?;
+        .ok_or_else(|| ProviderError::Malformed("search response missing data".into()))?;
     Ok(items.iter().filter_map(track_from_rest).collect())
 }
 
@@ -35,7 +35,7 @@ fn track_from_rest(c: &Value) -> Option<Track> {
     let artist = c
         .pointer("/user/name")
         .and_then(|n| n.as_str())
-        .unwrap_or("Inconnu")
+        .unwrap_or("Unknown")
         .to_string();
     let duration_ms = c
         .get("audio_length")
@@ -178,7 +178,7 @@ pub fn resolve(agent: &ureq::Agent, url: &str) -> Result<(Track, StreamSource), 
     let cc = query_cloudcast(agent, &user, &slug)?;
     if let Some(reason) = cc.get("restrictedReason").and_then(|r| r.as_str()) {
         return Err(ProviderError::Unavailable(format!(
-            "contenu restreint Mixcloud ({reason})"
+            "Mixcloud content restricted ({reason})"
         )));
     }
     let track = track_from_cc(&cc, &user, &slug);
@@ -206,7 +206,7 @@ fn query_cloudcast(agent: &ureq::Agent, user: &str, slug: &str) -> Result<Value,
     resp.pointer("/data/cloudcastLookup")
         .filter(|c| !c.is_null())
         .cloned()
-        .ok_or_else(|| ProviderError::Unavailable("cloudcast introuvable".into()))
+        .ok_or_else(|| ProviderError::Unavailable("cloudcast not found".into()))
 }
 
 /// Construit le modèle unifié depuis l'objet cloudcast GraphQL.
@@ -240,9 +240,7 @@ fn stream_from_cc(agent: &ureq::Agent, cc: &Value) -> Result<StreamSource, Provi
     let si = cc
         .get("streamInfo")
         .filter(|s| !s.is_null())
-        .ok_or_else(|| {
-            ProviderError::Unavailable("pas de streamInfo (exclusif ou supprimé)".into())
-        })?;
+        .ok_or_else(|| ProviderError::Unavailable("no streamInfo (exclusive or removed)".into()))?;
 
     // Préférence : url (progressif) > hlsUrl.
     if let Some(enc) = si
@@ -270,9 +268,7 @@ fn stream_from_cc(agent: &ureq::Agent, cc: &Value) -> Result<StreamSource, Provi
             });
         }
     }
-    Err(ProviderError::Unavailable(
-        "aucune URL de flux exploitable".into(),
-    ))
+    Err(ProviderError::Unavailable("no usable stream URL".into()))
 }
 
 fn expand_hls(agent: &ureq::Agent, m3u8_url: &str) -> Result<Vec<String>, ProviderError> {
@@ -284,7 +280,7 @@ fn expand_hls(agent: &ureq::Agent, m3u8_url: &str) -> Result<Vec<String>, Provid
         .map_err(|e| ProviderError::Http(HttpError::Decode(e.to_string())))?;
     if hls::is_encrypted(&text) {
         return Err(ProviderError::Unavailable(
-            "flux HLS chiffré non supporté".into(),
+            "encrypted HLS stream not supported".into(),
         ));
     }
     match hls::parse(&text, m3u8_url) {
@@ -292,7 +288,7 @@ fn expand_hls(agent: &ureq::Agent, m3u8_url: &str) -> Result<Vec<String>, Provid
         hls::Playlist::Master(variants) => {
             let first = variants
                 .first()
-                .ok_or_else(|| ProviderError::Malformed("master m3u8 vide".into()))?;
+                .ok_or_else(|| ProviderError::Malformed("empty master m3u8".into()))?;
             let t2 = agent
                 .get(first)
                 .call()
@@ -302,7 +298,7 @@ fn expand_hls(agent: &ureq::Agent, m3u8_url: &str) -> Result<Vec<String>, Provid
             match hls::parse(&t2, first) {
                 hls::Playlist::Media(segs) => Ok(segs),
                 hls::Playlist::Master(_) => {
-                    Err(ProviderError::Malformed("master m3u8 imbriqué".into()))
+                    Err(ProviderError::Malformed("nested master m3u8".into()))
                 }
             }
         }

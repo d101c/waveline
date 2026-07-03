@@ -22,7 +22,7 @@ impl Sink {
         for backend in Backend::ALL {
             match backend.spawn(sample_rate, channels) {
                 Ok(mut child) => {
-                    let stdin = child.stdin.take().expect("stdin demandé");
+                    let stdin = child.stdin.take().expect("stdin requested");
                     return Ok(Sink {
                         child,
                         stdin,
@@ -33,7 +33,10 @@ impl Sink {
             }
         }
         Err(last_err.unwrap_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "aucun lecteur PCM (pw-play/aplay)")
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "no PCM player found (pw-play/aplay)",
+            )
         }))
     }
 
