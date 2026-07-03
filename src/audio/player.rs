@@ -240,18 +240,18 @@ fn decode_loop(
             },
             &MetadataOptions::default(),
         )
-        .map_err(|e| format!("format audio non reconnu : {e}"))?;
+        .map_err(|e| format!("unrecognized audio format: {e}"))?;
     let mut format = probed.format;
 
     let track = format
         .tracks()
         .iter()
         .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
-        .ok_or_else(|| "aucune piste audio décodable".to_string())?;
+        .ok_or_else(|| "no decodable audio track".to_string())?;
     let track_id = track.id;
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|e| format!("codec non supporté : {e}"))?;
+        .map_err(|e| format!("unsupported codec: {e}"))?;
 
     let mut sink: Option<Sink> = None;
     let mut sample_buf: Option<SampleBuffer<i16>> = None;
@@ -340,13 +340,13 @@ fn decode_loop(
         if sink.is_none() {
             match Sink::open(spec.rate, spec.channels.count() as u16) {
                 Ok(s) => sink = Some(s),
-                Err(e) => return Err(format!("sortie audio indisponible : {e}")),
+                Err(e) => return Err(format!("audio output unavailable: {e}")),
             }
         }
         let vol = shared.volume.load(Ordering::Relaxed);
         if let Some(s) = sink.as_mut() {
             if let Err(e) = s.write(sbuf.samples(), vol) {
-                return Err(format!("écriture audio : {e}"));
+                return Err(format!("audio write: {e}"));
             }
         }
 

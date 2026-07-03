@@ -68,9 +68,9 @@ impl std::fmt::Display for ProviderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ProviderError::Http(e) => write!(f, "{e}"),
-            ProviderError::Unsupported(u) => write!(f, "URL non supportée : {u}"),
-            ProviderError::Malformed(m) => write!(f, "réponse inattendue : {m}"),
-            ProviderError::Unavailable(m) => write!(f, "indisponible : {m}"),
+            ProviderError::Unsupported(u) => write!(f, "unsupported URL: {u}"),
+            ProviderError::Malformed(m) => write!(f, "unexpected response: {m}"),
+            ProviderError::Unavailable(m) => write!(f, "unavailable: {m}"),
         }
     }
 }

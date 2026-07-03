@@ -84,7 +84,7 @@ fn scrape_client_id(agent: &ureq::Agent) -> Result<String, ProviderError> {
         }
     }
     Err(ProviderError::Malformed(
-        "client_id introuvable dans les bundles SoundCloud".into(),
+        "client_id not found in SoundCloud bundles".into(),
     ))
 }
 
@@ -149,7 +149,7 @@ pub fn search(agent: &ureq::Agent, query: &str, limit: u32) -> Result<Vec<Track>
     let items = v
         .get("collection")
         .and_then(|c| c.as_array())
-        .ok_or_else(|| ProviderError::Malformed("recherche sans collection".into()))?;
+        .ok_or_else(|| ProviderError::Malformed("search response missing collection".into()))?;
     Ok(items
         .iter()
         .filter(|t| t.get("kind").and_then(|k| k.as_str()) == Some("track"))
@@ -176,7 +176,7 @@ pub fn resolve_user_id(agent: &ureq::Agent, handle: &str) -> Result<i64, Provide
     }
     v.get("id")
         .and_then(|i| i.as_i64())
-        .ok_or_else(|| ProviderError::Malformed("profil sans id".into()))
+        .ok_or_else(|| ProviderError::Malformed("profile missing id".into()))
 }
 
 /// Likes publics d'un utilisateur (morceaux). `limit` ≤ 200.
@@ -274,7 +274,7 @@ fn resolve_json(agent: &ureq::Agent, url: &str, cid: &str) -> Result<Value, Prov
         .map_err(|e| ProviderError::Http(HttpError::Decode(e.to_string())))?;
     if v.get("media").is_none() && v.get("kind").and_then(|k| k.as_str()) != Some("track") {
         return Err(ProviderError::Unavailable(
-            "l'URL ne pointe pas vers un morceau jouable".into(),
+            "URL does not point to a playable track".into(),
         ));
     }
     Ok(v)
@@ -285,13 +285,13 @@ pub fn track_from_json(v: &Value) -> Result<Track, ProviderError> {
     let title = v
         .get("title")
         .and_then(|t| t.as_str())
-        .ok_or_else(|| ProviderError::Malformed("titre manquant".into()))?
+        .ok_or_else(|| ProviderError::Malformed("missing title".into()))?
         .to_string();
     let artist = v
         .get("user")
         .and_then(|u| u.get("username"))
         .and_then(|n| n.as_str())
-        .unwrap_or("Inconnu")
+        .unwrap_or("Unknown")
         .to_string();
     let id = v
         .get("urn")
@@ -330,7 +330,7 @@ fn pick_stream(
         .get("media")
         .and_then(|m| m.get("transcodings"))
         .and_then(|t| t.as_array())
-        .ok_or_else(|| ProviderError::Unavailable("aucun flux disponible".into()))?;
+        .ok_or_else(|| ProviderError::Unavailable("no stream available".into()))?;
 
     let mut candidates: Vec<(i32, &Value)> = Vec::new();
     let mut has_drm = false;
@@ -357,10 +357,10 @@ fn pick_stream(
 
     if has_drm {
         Err(ProviderError::Unavailable(
-            "titre protégé (DRM SoundCloud) — non lisible".into(),
+            "protected title (SoundCloud DRM) — not playable".into(),
         ))
     } else {
-        Err(last_err.unwrap_or_else(|| ProviderError::Unavailable("aucun flux jouable".into())))
+        Err(last_err.unwrap_or_else(|| ProviderError::Unavailable("no playable stream".into())))
     }
 }
 
@@ -374,7 +374,7 @@ fn try_transcoding(
     let endpoint = t
         .get("url")
         .and_then(|u| u.as_str())
-        .ok_or_else(|| ProviderError::Malformed("transcoding sans url".into()))?;
+        .ok_or_else(|| ProviderError::Malformed("transcoding missing url".into()))?;
     let mime = t
         .pointer("/format/mime_type")
         .and_then(|m| m.as_str())
@@ -398,7 +398,7 @@ fn try_transcoding(
     let stream_url = signed
         .get("url")
         .and_then(|u| u.as_str())
-        .ok_or_else(|| ProviderError::Malformed("url signée manquante".into()))?
+        .ok_or_else(|| ProviderError::Malformed("missing signed url".into()))?
         .to_string();
 
     if protocol == "progressive" {
@@ -458,7 +458,7 @@ fn expand_hls(agent: &ureq::Agent, m3u8_url: &str) -> Result<Vec<String>, Provid
         .map_err(|e| ProviderError::Http(HttpError::Decode(e.to_string())))?;
     if hls::is_encrypted(&text) {
         return Err(ProviderError::Unavailable(
-            "flux HLS chiffré (AES-128) non supporté".into(),
+            "encrypted HLS stream (AES-128) not supported".into(),
         ));
     }
     match hls::parse(&text, m3u8_url) {
@@ -476,7 +476,7 @@ fn expand_hls(agent: &ureq::Agent, m3u8_url: &str) -> Result<Vec<String>, Provid
             match hls::parse(&text2, first) {
                 hls::Playlist::Media(segs) => Ok(segs),
                 hls::Playlist::Master(_) => {
-                    Err(ProviderError::Malformed("master m3u8 imbriqué".into()))
+                    Err(ProviderError::Malformed("nested master m3u8".into()))
                 }
             }
         }

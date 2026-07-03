@@ -5,6 +5,7 @@
 //! `Player`. La position/durée/état de lecture affichés sont resynchronisés
 //! depuis le moteur à chaque frame (cf. `main.rs`).
 
+use crate::i18n::{self, Lang};
 use crate::model::{Platform, Track};
 
 /// Sections de la barre latérale gauche.
@@ -28,14 +29,17 @@ impl Section {
         Section::Queue,
     ];
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Section::Likes => "♥  Likes",
-            Section::Playlists => "☰  Playlists",
-            Section::Feed => "◎  Feed",
-            Section::Search => "⌕  Recherche",
-            Section::History => "⧗  Historique",
-            Section::Queue => "▤  File",
+    pub fn label(self, lang: Lang) -> &'static str {
+        match (self, lang) {
+            (Section::Likes, _) => "♥  Likes",
+            (Section::Playlists, _) => "☰  Playlists",
+            (Section::Feed, _) => "◎  Feed",
+            (Section::Search, Lang::En) => "⌕  Search",
+            (Section::Search, Lang::Fr) => "⌕  Recherche",
+            (Section::History, Lang::En) => "⧗  History",
+            (Section::History, Lang::Fr) => "⧗  Historique",
+            (Section::Queue, Lang::En) => "▤  Queue",
+            (Section::Queue, Lang::Fr) => "▤  File",
         }
     }
 }
@@ -48,9 +52,12 @@ pub enum Filter {
 }
 
 impl Filter {
-    pub fn label(self) -> String {
+    pub fn label(self, lang: Lang) -> String {
         match self {
-            Filter::All => "Tout".to_string(),
+            Filter::All => match lang {
+                Lang::En => "All".to_string(),
+                Lang::Fr => "Tout".to_string(),
+            },
             Filter::Only(p) => p.to_string(),
         }
     }
@@ -126,11 +133,14 @@ pub enum VizMode {
 impl VizMode {
     pub const ALL: [VizMode; 3] = [VizMode::Bars, VizMode::Mirror, VizMode::Scope];
 
-    pub fn label(self) -> &'static str {
-        match self {
-            VizMode::Bars => "barres",
-            VizMode::Mirror => "miroir",
-            VizMode::Scope => "oscilloscope",
+    pub fn label(self, lang: Lang) -> &'static str {
+        match (self, lang) {
+            (VizMode::Bars, Lang::En) => "bars",
+            (VizMode::Bars, Lang::Fr) => "barres",
+            (VizMode::Mirror, Lang::En) => "mirror",
+            (VizMode::Mirror, Lang::Fr) => "miroir",
+            (VizMode::Scope, Lang::En) => "scope",
+            (VizMode::Scope, Lang::Fr) => "oscilloscope",
         }
     }
 
@@ -150,8 +160,8 @@ pub enum Effect {
     Search(String),
     /// Charge une section de bibliothèque depuis les comptes configurés.
     LoadLibrary(crate::providers::LibrarySection),
-    /// Persiste les pseudos de compte sur disque.
-    SaveAccounts,
+    /// Persiste les pseudos de compte et la langue sur disque.
+    SaveConfig,
 }
 
 /// Intentions de haut niveau, indépendantes du clavier/souris.
@@ -173,6 +183,7 @@ pub enum Action {
     FilterAll,
     FilterSoundCloud,
     FilterMixcloud,
+    ToggleLang,
     Quit,
 }
 
@@ -194,6 +205,8 @@ pub struct App {
     pub mc_handle: Option<String>,
     /// Style d'analyseur visuel courant.
     pub viz: VizMode,
+    /// Langue de l'interface (anglais par défaut).
+    pub lang: Lang,
 }
 
 impl App {
@@ -210,13 +223,20 @@ impl App {
                 volume: 80,
                 ..Default::default()
             },
-            status: "Bienvenue — 'c' connecter un compte · ':' URL · '/' recherche · '?' aide"
-                .to_string(),
+            status: i18n::welcome(Lang::En),
             input: Input::Normal,
             sc_handle: None,
             mc_handle: None,
             viz: VizMode::Bars,
+            lang: Lang::En,
         }
+    }
+
+    /// Applique la langue chargée depuis la config au démarrage (avant la
+    /// première frame) et rafraîchit le message d'accueil en conséquence.
+    pub fn set_startup_lang(&mut self, lang: Lang) {
+        self.lang = lang;
+        self.status = i18n::welcome(lang);
     }
 
     /// Indique si au moins un compte est connecté.
@@ -227,7 +247,7 @@ impl App {
     /// Passe au style de visualiseur suivant.
     pub fn cycle_viz(&mut self) {
         self.viz = self.viz.next();
-        self.status = format!("Visualiseur : {}", self.viz.label());
+        self.status = i18n::viz_changed(self.lang, self.viz.label(self.lang));
     }
 
     /// Indices des morceaux visibles après application du filtre courant.
@@ -313,6 +333,11 @@ impl App {
                 self.set_filter(Filter::Only(Platform::Mixcloud));
                 None
             }
+            Action::ToggleLang => {
+                self.lang = self.lang.toggle();
+                self.status = i18n::lang_changed(self.lang);
+                Some(Effect::SaveConfig)
+            }
         }
     }
 
@@ -353,7 +378,7 @@ impl App {
             Focus::Sidebar => self.open_section(),
             Focus::List => match self.selected_url() {
                 Some(url) => {
-                    self.status = "Chargement…".to_string();
+                    self.status = i18n::loading(self.lang);
                     Some(Effect::Play(url))
                 }
                 None => None,
@@ -374,18 +399,18 @@ impl App {
                 return None;
             }
             Section::History | Section::Queue => {
-                self.status = format!("{} — bientôt", self.section.label().trim());
+                self.status = i18n::section_soon(self.lang, self.section.label(self.lang).trim());
                 return None;
             }
         };
         match lib {
             Some(sec) if self.has_account() => {
-                self.status = format!("Chargement de {}…", self.section.label().trim());
+                self.status =
+                    i18n::loading_section(self.lang, self.section.label(self.lang).trim());
                 Some(Effect::LoadLibrary(sec))
             }
             Some(_) => {
-                self.status =
-                    "Aucun compte connecté — appuie sur 'c' pour entrer tes pseudos".to_string();
+                self.status = i18n::no_account(self.lang);
                 None
             }
             None => None,
@@ -405,14 +430,14 @@ impl App {
     fn bump_volume(&mut self, delta: i32) -> Effect {
         let v = (self.playback.volume as i32 + delta).clamp(0, 100) as u8;
         self.playback.volume = v;
-        self.status = format!("Volume : {v}%");
+        self.status = i18n::volume(self.lang, v);
         Effect::SetVolume(v)
     }
 
     fn set_filter(&mut self, f: Filter) {
         self.filter = f;
         self.list_index = 0;
-        self.status = format!("Filtre : {}", f.label());
+        self.status = i18n::filter_changed(self.lang, &f.label(self.lang));
     }
 
     // --- Mode saisie (`:` URL) ------------------------------------------------
@@ -457,10 +482,10 @@ impl App {
                 if url.is_empty() {
                     None
                 } else if crate::providers::platform_of(&url).is_some() {
-                    self.status = "Chargement…".to_string();
+                    self.status = i18n::loading(self.lang);
                     Some(Effect::Play(url))
                 } else {
-                    self.status = "URL non reconnue (SoundCloud ou Mixcloud)".to_string();
+                    self.status = i18n::url_unrecognized(self.lang);
                     None
                 }
             }
@@ -469,7 +494,7 @@ impl App {
                 if q.is_empty() {
                     None
                 } else {
-                    self.status = format!("Recherche : « {q} »…");
+                    self.status = i18n::searching(self.lang, &q);
                     Some(Effect::Search(q))
                 }
             }
@@ -481,12 +506,12 @@ impl App {
             }
             Input::ConnectMixcloud(s) => {
                 self.mc_handle = crate::config::normalize_handle(&s);
-                self.status = format!(
-                    "Comptes — SoundCloud : {} · Mixcloud : {}  (ouvre Likes/Playlists/Feed)",
+                self.status = i18n::accounts_status(
+                    self.lang,
                     self.sc_handle.as_deref().unwrap_or("—"),
                     self.mc_handle.as_deref().unwrap_or("—"),
                 );
-                Some(Effect::SaveAccounts)
+                Some(Effect::SaveConfig)
             }
             Input::Normal => None,
         }
@@ -504,9 +529,9 @@ impl App {
             .position(|s| *s == Section::Search)
             .unwrap_or(0);
         self.status = if n == 0 {
-            "Aucun résultat".to_string()
+            i18n::no_results(self.lang)
         } else {
-            format!("{n} résultats")
+            i18n::n_results(self.lang, n)
         };
     }
 }
@@ -589,6 +614,22 @@ mod tests {
         }
         assert_eq!(a.playback.volume, 100);
         assert_eq!(last, Some(Effect::SetVolume(100)));
+    }
+
+    #[test]
+    fn anglais_par_defaut_et_bascule_vers_le_francais() {
+        let a = App::new();
+        assert_eq!(a.lang, Lang::En);
+        assert_eq!(Section::Search.label(a.lang), "⌕  Search");
+
+        let mut a = App::new();
+        let eff = a.apply(Action::ToggleLang);
+        assert_eq!(a.lang, Lang::Fr);
+        assert_eq!(Section::Search.label(a.lang), "⌕  Recherche");
+        assert_eq!(eff, Some(Effect::SaveConfig));
+
+        a.apply(Action::ToggleLang);
+        assert_eq!(a.lang, Lang::En);
     }
 
     #[test]

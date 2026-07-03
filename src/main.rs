@@ -9,6 +9,7 @@ mod audio;
 mod b64;
 mod config;
 mod http;
+mod i18n;
 mod model;
 mod mpris;
 mod providers;
@@ -83,7 +84,7 @@ fn main() -> io::Result<()> {
                 .map(|s| s.as_str());
             let agent = http::agent();
             let tracks = providers::library(&agent, sc, mc, sec);
-            println!("{} morceaux", tracks.len());
+            println!("{} tracks", tracks.len());
             for t in tracks.iter().take(20) {
                 println!(
                     "[{}] {} — {} ({})",
@@ -115,10 +116,11 @@ fn run(terminal: &mut Tui, app: &mut App, theme: &Theme) -> io::Result<()> {
     let mut last_finished = player.shared().finished_generation.load(Ordering::Relaxed);
     let mut search_rx: Option<std::sync::mpsc::Receiver<Vec<Track>>> = None;
 
-    // Comptes connectés (pseudos publics) chargés depuis la config.
+    // Comptes connectés (pseudos publics) et langue chargés depuis la config.
     let mut config = Config::load();
     app.sc_handle = config.soundcloud.clone();
     app.mc_handle = config.mixcloud.clone();
+    app.set_startup_lang(config.lang);
 
     // Intégration MPRIS : touches média / contrôles bureau. No-op sans D-Bus.
     let (media_tx, media_rx) = std::sync::mpsc::channel::<MediaCommand>();
@@ -200,9 +202,10 @@ fn dispatch_effect(
                 sec,
             ));
         }
-        Effect::SaveAccounts => {
+        Effect::SaveConfig => {
             config.soundcloud = app.sc_handle.clone();
             config.mixcloud = app.mc_handle.clone();
+            config.lang = app.lang;
             config.save();
         }
         other => exec(player, other),
@@ -230,7 +233,7 @@ fn handle_media(app: &mut App, cmd: MediaCommand) -> Option<Effect> {
             }
         }
         MediaCommand::Stop => {
-            app.status = "Lecture arrêtée".into();
+            app.status = i18n::playback_stopped(app.lang);
             Some(Effect::Stop)
         }
         MediaCommand::SetVolume(v) => {
@@ -275,7 +278,7 @@ fn exec(player: &Player, effect: Effect) {
         Effect::Stop => player.stop(),
         Effect::SetVolume(v) => player.set_volume(v),
         // Recherche / bibliothèque / sauvegarde sont gérées en amont, jamais ici.
-        Effect::Search(_) | Effect::LoadLibrary(_) | Effect::SaveAccounts => {}
+        Effect::Search(_) | Effect::LoadLibrary(_) | Effect::SaveConfig => {}
     }
 }
 
@@ -331,7 +334,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<Effect> {
     }
     // Arrêt complet de la lecture.
     if key.code == KeyCode::Char('s') {
-        app.status = "Lecture arrêtée".into();
+        app.status = i18n::playback_stopped(app.lang);
         return Some(Effect::Stop);
     }
 
@@ -369,9 +372,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<Effect> {
             app.cycle_viz();
             None
         }
+        KeyCode::Char('L') => Some(Action::ToggleLang),
         KeyCode::Char('?') => {
-            app.status =
-                "Aide : 'c' comptes · 'v' visualiseur · ':' URL · '/' rech · j/k naviguer · enter/clic jouer · space pause · n/p · s stop · 1/2/3 filtre · q quitter".into();
+            app.status = i18n::help_text(app.lang);
             None
         }
         _ => None,
@@ -392,6 +395,9 @@ fn handle_mouse(app: &mut App, regions: &Regions, m: MouseEvent) -> Option<Effec
             }
             if regions.playpause_at(x, y) {
                 return app.apply(Action::PlayPause);
+            }
+            if regions.lang_at(x, y) {
+                return app.apply(Action::ToggleLang);
             }
             if let Some(i) = regions.section_at(x, y) {
                 app.focus = Focus::Sidebar;
@@ -429,18 +435,18 @@ fn debug_resolve(url: Option<&str>) -> io::Result<()> {
     let agent = http::agent();
     match providers::resolve_url(&agent, url) {
         Ok((track, source)) => {
-            println!("Plateforme : {}", track.platform);
-            println!("Titre      : {}", track.title);
-            println!("Artiste    : {}", track.artist);
-            println!("Durée      : {}", track.duration_human());
-            println!("Conteneur  : {:?}", source.container);
+            println!("Platform   : {}", track.platform);
+            println!("Title      : {}", track.title);
+            println!("Artist     : {}", track.artist);
+            println!("Duration   : {}", track.duration_human());
+            println!("Container  : {:?}", source.container);
             match source.kind {
                 providers::StreamKind::Progressive(u) => {
-                    println!("Flux       : progressif");
+                    println!("Stream     : progressive");
                     println!("URL        : {}", truncate(&u, 100));
                 }
                 providers::StreamKind::HlsSegments(segs) => {
-                    println!("Flux       : HLS, {} segments", segs.len());
+                    println!("Stream     : HLS, {} segments", segs.len());
                     if let Some(first) = segs.first() {
                         println!("Segment 0  : {}", truncate(first, 100));
                     }
@@ -449,16 +455,16 @@ fn debug_resolve(url: Option<&str>) -> io::Result<()> {
             Ok(())
         }
         Err(e) => {
-            eprintln!("Échec de résolution : {e}");
+            eprintln!("Resolution failed: {e}");
             std::process::exit(1);
         }
     }
 }
 
-/// `waveline play <url> [secondes]` : joue le flux N secondes (test du moteur).
+/// `waveline play <url> [seconds]` : joue le flux N secondes (test du moteur).
 fn debug_play(url: Option<&str>, secs: Option<&str>) -> io::Result<()> {
     let Some(url) = url else {
-        eprintln!("usage: waveline play <url> [secondes]");
+        eprintln!("usage: waveline play <url> [seconds]");
         std::process::exit(2);
     };
     let limit = secs.and_then(|s| s.parse::<u64>().ok()).unwrap_or(10);
@@ -466,11 +472,11 @@ fn debug_play(url: Option<&str>, secs: Option<&str>) -> io::Result<()> {
     player.play_url(url);
     let shared = player.shared();
     let start = std::time::Instant::now();
-    println!("Lecture {limit}s de : {url}");
+    println!("Playing {limit}s of: {url}");
     loop {
         std::thread::sleep(Duration::from_millis(300));
         if let Some(err) = shared.error.lock().unwrap().clone() {
-            eprintln!("Erreur : {err}");
+            eprintln!("Error: {err}");
             std::process::exit(1);
         }
         let pos = shared.position_ms.load(Ordering::Relaxed);
@@ -493,7 +499,7 @@ fn debug_play(url: Option<&str>, secs: Option<&str>) -> io::Result<()> {
         use std::io::Write as _;
         let _ = io::stdout().flush();
         if start.elapsed().as_secs() >= limit {
-            println!("\nFin du test.");
+            println!("\nTest finished.");
             break;
         }
     }

@@ -1,41 +1,42 @@
 # waveline
 
-**Écoute Mixcloud & SoundCloud depuis ton terminal**, au même endroit — TUI
-cliquable, raccourcis vim, analyseur de spectre, touches média.
+**Listen to Mixcloud & SoundCloud from your terminal**, in one place — a
+clickable TUI, vim keybindings, spectrum analyzer, media keys.
 
 ```sh
 npx waveline
 ```
 
-C'est tout. `npx` télécharge un petit launcher qui récupère le binaire Rust
-adapté à ta machine depuis les [Releases GitHub](https://github.com/d101c/waveline/releases),
-le met en cache, et le lance.
+That's it. `npx` downloads a tiny launcher that fetches the Rust binary
+matching your machine from the [GitHub Releases](https://github.com/d101c/waveline/releases),
+caches it, and runs it.
 
-## Prérequis
+## Requirements
 
-- **Linux** (x86_64 ou arm64) — la sortie audio utilise **PipeWire** (`pw-play`)
-  ou **ALSA** (`aplay`), présents sur la plupart des distributions.
-- Node ≥ 14 (uniquement pour ce launcher ; le binaire lui-même n'en dépend pas).
+- **Linux** (x86_64 or arm64) — audio output uses **PipeWire** (`pw-play`)
+  or **ALSA** (`aplay`), available on most distributions.
+- Node ≥ 14 (only for this launcher; the binary itself doesn't depend on it).
 
-## Installation permanente
-
-```sh
-npm install -g waveline   # puis : waveline
-```
-
-Ou sans Node du tout :
+## Permanent install
 
 ```sh
-cargo install waveline                 # depuis crates.io
-cargo binstall waveline                # binaire pré-compilé
+npm install -g waveline   # then: waveline
 ```
 
-## Utilisation
+Or without Node at all:
 
-`c` connecter tes comptes · `/` rechercher · `:` coller une URL · `Espace`
-play/pause · `v` changer de visualiseur · `?` aide · `q` quitter.
+```sh
+cargo install waveline                 # from crates.io
+cargo binstall waveline                # pre-built binary
+```
 
-Code source, documentation et autres modes d'installation :
+## Usage
+
+`c` connect your accounts · `/` search · `:` paste a URL · `Space`
+play/pause · `v` cycle the visualizer · `L` switch language (English/French)
+· `?` help · `q` quit.
+
+Source code, documentation, and other install methods:
 <https://github.com/d101c/waveline>
 
 MIT

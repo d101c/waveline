@@ -2,7 +2,7 @@
 name = "waveline"
 version = "0.1.0"
 edition = "2021"
-description = "TUI unifiée pour écouter Mixcloud & SoundCloud depuis la console — cliquable, raccourcis vim, analyseur de spectre, touches média (MPRIS)"
+description = "Unified TUI for listening to Mixcloud & SoundCloud from the console — clickable, vim keybindings, spectrum analyzer, media keys (MPRIS)"
 license = "MIT"
 repository = "https://github.com/d101c/waveline"
 homepage = "https://github.com/d101c/waveline"

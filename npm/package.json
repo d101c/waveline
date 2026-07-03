@@ -1,7 +1,7 @@
 {
   "name": "waveline",
   "version": "0.1.0",
-  "description": "TUI unifiée pour écouter Mixcloud & SoundCloud depuis la console : un seul endroit, cliquable, raccourcis vim, analyseur de spectre, touches média.",
+  "description": "Unified TUI for listening to Mixcloud & SoundCloud from the console: one place, clickable, vim keybindings, spectrum analyzer, media keys.",
   "bin": {
     "waveline": "bin/waveline.js"
   },
