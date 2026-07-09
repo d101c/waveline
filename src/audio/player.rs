@@ -16,10 +16,11 @@ use super::spectrum::{self, BANDS};
 
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
-use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
+use symphonia::core::units::Time;
 
 use super::sink::Sink;
 use super::source::{HlsReader, HttpStream};
@@ -31,6 +32,8 @@ enum Command {
     Play(String), // URL/permalink à résoudre puis jouer
     Pause,
     Resume,
+    /// Saut relatif dans le morceau courant (delta signé en millisecondes).
+    Seek(i64),
     Stop,
     Quit,
 }
@@ -41,6 +44,8 @@ pub struct Shared {
     pub duration_ms: AtomicU64,
     pub playing: AtomicBool,
     pub loading: AtomicBool,
+    /// Vrai si le flux courant supporte le saut (progressif seekable).
+    pub seekable: AtomicBool,
     pub volume: AtomicU8,
     /// Incrémenté quand un morceau se termine naturellement (l'UI enchaîne).
     pub finished_generation: AtomicU64,
@@ -62,6 +67,7 @@ impl Shared {
             duration_ms: AtomicU64::new(0),
             playing: AtomicBool::new(false),
             loading: AtomicBool::new(false),
+            seekable: AtomicBool::new(false),
             volume: AtomicU8::new(volume),
             finished_generation: AtomicU64::new(0),
             now: Mutex::new(None),
@@ -118,6 +124,12 @@ impl Player {
 
     pub fn resume(&self) {
         let _ = self.tx.send(Command::Resume);
+    }
+
+    /// Demande un saut relatif de `delta_ms` (signé) dans le morceau courant.
+    /// Sans effet hors lecture ou sur un flux non-seekable.
+    pub fn seek(&self, delta_ms: i64) {
+        let _ = self.tx.send(Command::Seek(delta_ms));
     }
 
     /// Bascule lecture/pause selon l'état courant.
@@ -198,6 +210,11 @@ fn play_one(
         }
         StreamKind::HlsSegments(segs) => Box::new(HlsReader::new(agent.clone(), segs)),
     };
+    // Le saut n'est possible que sur un flux seekable (progressif avec taille
+    // connue) ; le HLS ne l'est pas. L'UI s'en sert pour activer/refuser le saut.
+    shared
+        .seekable
+        .store(media.is_seekable(), Ordering::Relaxed);
 
     // 3. Décode et joue.
     match decode_loop(rx, shared, media, source.container)? {
@@ -282,6 +299,25 @@ fn decode_loop(
                 Some(Command::Resume) => {
                     paused = false;
                     shared.playing.store(true, Ordering::Relaxed);
+                }
+                Some(Command::Seek(delta)) => {
+                    let cur = shared.position_ms.load(Ordering::Relaxed) as i64;
+                    let dur = shared.duration_ms.load(Ordering::Relaxed) as i64;
+                    let target = (cur + delta).clamp(0, dur.max(0)) as u64;
+                    let secs = target as f64 / 1000.0;
+                    let to = SeekTo::Time {
+                        time: Time::new(secs as u64, secs.fract()),
+                        track_id: Some(track_id),
+                    };
+                    if format.seek(SeekMode::Coarse, to).is_ok() {
+                        decoder.reset();
+                        if spec_rate > 0 {
+                            frames_total = target * spec_rate as u64 / 1000;
+                        }
+                        shared.position_ms.store(target, Ordering::Relaxed);
+                        sink = None; // purge le son bufferisé d'avant le saut
+                        shared.clear_spectrum();
+                    }
                 }
                 Some(Command::Stop) => {
                     shared.position_ms.store(0, Ordering::Relaxed);

@@ -5,6 +5,8 @@
 //! `Player`. La position/durée/état de lecture affichés sont resynchronisés
 //! depuis le moteur à chaque frame (cf. `main.rs`).
 
+use std::time::{Duration, Instant};
+
 use crate::i18n::{self, Lang};
 use crate::model::{Platform, Track};
 
@@ -113,10 +115,59 @@ pub struct Playback {
     pub position_ms: u64,
     pub duration_ms: u64,
     pub volume: u8,
+    /// Vrai si le flux courant supporte le saut (progressif seekable). Faux pour
+    /// le HLS : dans ce cas les raccourcis de saut affichent un message et
+    /// n'agissent pas.
+    pub seekable: bool,
     /// Amplitudes du spectre par bande (0..1), pour l'analyseur visuel.
     pub spectrum: Vec<f32>,
     /// Échantillons de forme d'onde (~[-1,1]) pour le mode oscilloscope.
     pub waveform: Vec<f32>,
+}
+
+/// Pas de saut successifs (ms) : 10s → 30s → 1min → 5min → 10min.
+const SEEK_STEPS_MS: [i64; 5] = [10_000, 30_000, 60_000, 300_000, 600_000];
+/// Nombre d'appuis consécutifs par palier avant de passer au pas suivant.
+const SEEK_TIER_PRESSES: u32 = 3;
+/// Au-delà de ce délai entre deux appuis, l'accélération repart du plus petit pas.
+const SEEK_RESET_AFTER: Duration = Duration::from_millis(1500);
+
+/// Accélération du saut par répétition rapide.
+///
+/// Chaque palier dure [`SEEK_TIER_PRESSES`] appuis ; on monte ensuite d'un cran
+/// dans [`SEEK_STEPS_MS`]. Le compteur repart de zéro après une pause
+/// (> [`SEEK_RESET_AFTER`]) ou un changement de sens. Le temps est injecté
+/// (`now`) pour garder la logique testable et hors de la couche I/O.
+#[derive(Debug, Default)]
+pub struct SeekAccel {
+    last: Option<Instant>,
+    /// Sens du dernier appui (+1 avant, -1 arrière, 0 au repos).
+    dir: i8,
+    /// Appuis consécutifs dans le sens courant.
+    count: u32,
+}
+
+impl SeekAccel {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enregistre un appui de saut dans le sens `dir` (+1 avant, -1 arrière) à
+    /// l'instant `now` et renvoie le delta signé en millisecondes à appliquer.
+    pub fn step(&mut self, now: Instant, dir: i8) -> i64 {
+        let restart = match self.last {
+            Some(prev) => now.duration_since(prev) > SEEK_RESET_AFTER || dir != self.dir,
+            None => true,
+        };
+        if restart {
+            self.count = 0;
+            self.dir = dir;
+        }
+        self.count += 1;
+        self.last = Some(now);
+        let tier = ((self.count - 1) / SEEK_TIER_PRESSES).min(SEEK_STEPS_MS.len() as u32 - 1);
+        SEEK_STEPS_MS[tier as usize] * dir as i64
+    }
 }
 
 /// Style d'analyseur visuel (cyclé avec `v`).
@@ -157,6 +208,8 @@ pub enum Effect {
     Toggle,
     Stop,
     SetVolume(u8),
+    /// Saut relatif dans le morceau courant (delta signé en millisecondes).
+    Seek(i64),
     Search(String),
     /// Charge une section de bibliothèque depuis les comptes configurés.
     LoadLibrary(crate::providers::LibrarySection),
@@ -172,8 +225,6 @@ pub enum Action {
     Top,
     Bottom,
     Activate,
-    FocusSidebar,
-    FocusList,
     ToggleFocus,
     PlayPause,
     Next,
@@ -282,14 +333,6 @@ impl App {
                     Focus::Sidebar => Focus::List,
                     Focus::List => Focus::Sidebar,
                 };
-                None
-            }
-            Action::FocusSidebar => {
-                self.focus = Focus::Sidebar;
-                None
-            }
-            Action::FocusList => {
-                self.focus = Focus::List;
                 None
             }
             Action::Up => {
@@ -425,6 +468,25 @@ impl App {
         let i = (self.list_index as i32 + delta).clamp(0, vis.len() as i32 - 1) as usize;
         self.list_index = i;
         self.selected_url().map(Effect::Play)
+    }
+
+    /// Saut relatif dans le morceau courant. `delta_ms` est signé (négatif =
+    /// arrière). Renvoie `None` (sans effet) si rien n'est en lecture ou si le
+    /// flux n'est pas seekable ; sinon met à jour la position affichée de façon
+    /// optimiste (le moteur confirme au tick suivant) et renvoie l'effet.
+    pub fn seek(&mut self, delta_ms: i64) -> Option<Effect> {
+        if self.playback.current.is_none() || self.playback.duration_ms == 0 {
+            return None;
+        }
+        if !self.playback.seekable {
+            self.status = i18n::seek_unavailable(self.lang);
+            return None;
+        }
+        let dur = self.playback.duration_ms as i64;
+        let target = (self.playback.position_ms as i64 + delta_ms).clamp(0, dur);
+        self.playback.position_ms = target as u64;
+        self.status = i18n::seek(self.lang, delta_ms);
+        Some(Effect::Seek(delta_ms))
     }
 
     fn bump_volume(&mut self, delta: i32) -> Effect {
@@ -667,5 +729,93 @@ mod tests {
             a.input_push(c);
         }
         assert_eq!(a.input_submit(), None);
+    }
+
+    #[test]
+    fn seek_accel_monte_par_paliers_de_trois_appuis() {
+        let mut s = SeekAccel::new();
+        let t = Instant::now();
+        // Appuis 1-3 : 10s.
+        for _ in 0..3 {
+            assert_eq!(s.step(t, 1), 10_000);
+        }
+        // Appuis 4-6 : 30s.
+        for _ in 0..3 {
+            assert_eq!(s.step(t, 1), 30_000);
+        }
+        // Appuis 7-9 : 1min.
+        for _ in 0..3 {
+            assert_eq!(s.step(t, 1), 60_000);
+        }
+        // Appuis 10-12 : 5min.
+        for _ in 0..3 {
+            assert_eq!(s.step(t, 1), 300_000);
+        }
+        // Appuis 13+ : 10min, puis plafonne.
+        for _ in 0..5 {
+            assert_eq!(s.step(t, 1), 600_000);
+        }
+    }
+
+    #[test]
+    fn seek_accel_arriere_est_signe_negatif() {
+        let mut s = SeekAccel::new();
+        let t = Instant::now();
+        assert_eq!(s.step(t, -1), -10_000);
+    }
+
+    #[test]
+    fn seek_accel_repart_apres_une_pause() {
+        let mut s = SeekAccel::new();
+        let t = Instant::now();
+        for _ in 0..4 {
+            s.step(t, 1); // rendu au palier 30s
+        }
+        assert_eq!(s.step(t, 1), 30_000);
+        // Pause > 1,5 s : le pas repart à 10s.
+        let later = t + Duration::from_millis(1600);
+        assert_eq!(s.step(later, 1), 10_000);
+    }
+
+    #[test]
+    fn seek_accel_repart_au_changement_de_sens() {
+        let mut s = SeekAccel::new();
+        let t = Instant::now();
+        for _ in 0..4 {
+            s.step(t, 1); // 30s vers l'avant
+        }
+        // Inverser le sens ramène au plus petit pas.
+        assert_eq!(s.step(t, -1), -10_000);
+    }
+
+    #[test]
+    fn seek_sans_lecture_ou_non_seekable_ne_fait_rien() {
+        let mut a = App::new();
+        // Rien en lecture.
+        assert_eq!(a.seek(10_000), None);
+        // En lecture mais flux non-seekable (HLS).
+        a.playback.current = Some(track(Platform::Mixcloud, "mc1"));
+        a.playback.duration_ms = 200_000;
+        a.playback.position_ms = 50_000;
+        a.playback.seekable = false;
+        assert_eq!(a.seek(10_000), None);
+        assert_eq!(a.playback.position_ms, 50_000); // inchangé
+    }
+
+    #[test]
+    fn seek_seekable_borne_la_position_et_emet_leffet() {
+        let mut a = App::new();
+        a.playback.current = Some(track(Platform::SoundCloud, "sc1"));
+        a.playback.duration_ms = 200_000;
+        a.playback.seekable = true;
+        a.playback.position_ms = 50_000;
+        assert_eq!(a.seek(10_000), Some(Effect::Seek(10_000)));
+        assert_eq!(a.playback.position_ms, 60_000);
+        // Bornage en bas.
+        assert_eq!(a.seek(-999_000), Some(Effect::Seek(-999_000)));
+        assert_eq!(a.playback.position_ms, 0);
+        // Bornage en haut.
+        assert_eq!(a.seek(999_000), Some(Effect::Seek(999_000)));
+        assert_eq!(a.playback.position_ms, 200_000);
     }
 }
