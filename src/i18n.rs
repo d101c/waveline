@@ -142,6 +142,28 @@ pub fn n_results(lang: Lang, n: usize) -> String {
     }
 }
 
+/// Message de saut dans le morceau (`⏪ −30s` / `⏩ +1min`).
+pub fn seek(_lang: Lang, delta_ms: i64) -> String {
+    let secs = delta_ms.unsigned_abs() / 1000;
+    let mag = if secs >= 60 {
+        format!("{}min", secs / 60)
+    } else {
+        format!("{secs}s")
+    };
+    if delta_ms < 0 {
+        format!("⏪ −{mag}")
+    } else {
+        format!("⏩ +{mag}")
+    }
+}
+
+pub fn seek_unavailable(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Seek unavailable on this stream".into(),
+        Lang::Fr => "Saut indisponible sur ce flux".into(),
+    }
+}
+
 pub fn playback_stopped(lang: Lang) -> String {
     match lang {
         Lang::En => "Playback stopped".into(),
@@ -151,18 +173,18 @@ pub fn playback_stopped(lang: Lang) -> String {
 
 pub fn help_text(lang: Lang) -> String {
     match lang {
-        Lang::En => "Help: 'c' accounts · 'v' visualizer · 'L' language · ':' URL · '/' search · j/k navigate · enter/click play · space pause · n/p · s stop · 1/2/3 filter · q quit".into(),
-        Lang::Fr => "Aide : 'c' comptes · 'v' visualiseur · 'L' langue · ':' URL · '/' rech · j/k naviguer · enter/clic jouer · space pause · n/p · s stop · 1/2/3 filtre · q quitter".into(),
+        Lang::En => "Help: 'c' accounts · 'v' visualizer · 'L' language · ':' URL · '/' search · j/k navigate · h/l (←/→) seek ±10s · tab focus · enter/click play · space pause · n/p track · s stop · 1/2/3 filter · q quit".into(),
+        Lang::Fr => "Aide : 'c' comptes · 'v' visualiseur · 'L' langue · ':' URL · '/' rech · j/k naviguer · h/l (←/→) saut ±10s · tab focus · enter/clic jouer · space pause · n/p piste · s stop · 1/2/3 filtre · q quitter".into(),
     }
 }
 
 pub fn keys_bar(lang: Lang) -> &'static str {
     match lang {
         Lang::En => {
-            "[space] play  [n/p] next/prev  [:] url  [/] search  [tab] focus  [1·2·3] filter  [L] lang  [?] help:q"
+            "[space] play  [h/l] seek  [n/p] track  [:] url  [/] search  [tab] focus  [1·2·3] filter  [L] lang  [?] help:q"
         }
         Lang::Fr => {
-            "[space] play  [n/p] suiv/préc  [:] url  [/] rech  [tab] focus  [1·2·3] filtre  [L] langue  [?] aide:q"
+            "[space] play  [h/l] saut  [n/p] piste  [:] url  [/] rech  [tab] focus  [1·2·3] filtre  [L] langue  [?] aide:q"
         }
     }
 }

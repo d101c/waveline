@@ -18,7 +18,7 @@ mod ui;
 
 use std::io::{self, Stdout};
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -31,7 +31,7 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use app::{Action, App, Effect, Focus, Input};
+use app::{Action, App, Effect, Focus, Input, SeekAccel};
 use audio::Player;
 use config::Config;
 use model::{Platform, Track};
@@ -115,6 +115,7 @@ fn run(terminal: &mut Tui, app: &mut App, theme: &Theme) -> io::Result<()> {
     let mut regions = Regions::default();
     let mut last_finished = player.shared().finished_generation.load(Ordering::Relaxed);
     let mut search_rx: Option<std::sync::mpsc::Receiver<Vec<Track>>> = None;
+    let mut seek_accel = SeekAccel::new();
 
     // Comptes connectés (pseudos publics) et langue chargés depuis la config.
     let mut config = Config::load();
@@ -172,7 +173,7 @@ fn run(terminal: &mut Tui, app: &mut App, theme: &Theme) -> io::Result<()> {
         let tick = if app.playback.playing { 33 } else { 250 };
         if event::poll(Duration::from_millis(tick))? {
             let effect = match event::read()? {
-                Event::Key(key) => handle_key(app, key),
+                Event::Key(key) => handle_key(app, &mut seek_accel, key),
                 Event::Mouse(m) => handle_mouse(app, &regions, m),
                 _ => None,
             };
@@ -277,6 +278,7 @@ fn exec(player: &Player, effect: Effect) {
         Effect::Toggle => player.toggle(),
         Effect::Stop => player.stop(),
         Effect::SetVolume(v) => player.set_volume(v),
+        Effect::Seek(delta_ms) => player.seek(delta_ms),
         // Recherche / bibliothèque / sauvegarde sont gérées en amont, jamais ici.
         Effect::Search(_) | Effect::LoadLibrary(_) | Effect::SaveConfig => {}
     }
@@ -289,6 +291,7 @@ fn sync_playback(app: &mut App, player: &Player) {
     app.playback.duration_ms = s.duration_ms.load(Ordering::Relaxed);
     app.playback.playing = s.playing.load(Ordering::Relaxed);
     app.playback.loading = s.loading.load(Ordering::Relaxed);
+    app.playback.seekable = s.seekable.load(Ordering::Relaxed);
     if let Ok(now) = s.now.lock() {
         app.playback.current = now.clone();
     }
@@ -305,7 +308,7 @@ fn sync_playback(app: &mut App, player: &Player) {
     }
 }
 
-fn handle_key(app: &mut App, key: KeyEvent) -> Option<Effect> {
+fn handle_key(app: &mut App, seek: &mut SeekAccel, key: KeyEvent) -> Option<Effect> {
     if key.kind != KeyEventKind::Press {
         return None;
     }
@@ -338,6 +341,18 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<Effect> {
         return Some(Effect::Stop);
     }
 
+    // Saut dans le morceau : h/← recule, l/→ avance, avec accélération sur
+    // répétition rapide (cf. `SeekAccel`). `Tab` reste le seul changement de
+    // panneau, ce qui libère ces touches.
+    let seek_dir = match key.code {
+        KeyCode::Char('l') | KeyCode::Right => Some(1i8),
+        KeyCode::Char('h') | KeyCode::Left => Some(-1i8),
+        _ => None,
+    };
+    if let Some(dir) = seek_dir {
+        return app.seek(seek.step(Instant::now(), dir));
+    }
+
     let action = match key.code {
         KeyCode::Char('q') => Some(Action::Quit),
         KeyCode::Char(' ') => Some(Action::PlayPause),
@@ -347,8 +362,6 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<Effect> {
         KeyCode::Char('G') => Some(Action::Bottom),
         KeyCode::Enter => Some(Action::Activate),
         KeyCode::Tab => Some(Action::ToggleFocus),
-        KeyCode::Char('h') | KeyCode::Left => Some(Action::FocusSidebar),
-        KeyCode::Char('l') | KeyCode::Right => Some(Action::FocusList),
         KeyCode::Char('n') => Some(Action::Next),
         KeyCode::Char('p') => Some(Action::Prev),
         KeyCode::Char('+') | KeyCode::Char('=') => Some(Action::VolumeUp),
