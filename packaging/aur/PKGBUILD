@@ -3,7 +3,7 @@
 # Nom AUR suggéré : waveline-bin
 pkgname=waveline-bin
 _pkgname=waveline
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="TUI unifiée pour écouter Mixcloud & SoundCloud (cliquable, spectre, MPRIS)"
 arch=('x86_64' 'aarch64')

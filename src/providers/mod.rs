@@ -104,12 +104,59 @@ pub fn resolve_url(agent: &ureq::Agent, url: &str) -> Result<(Track, StreamSourc
     }
 }
 
-/// Recherche unifiée : interroge les deux plateformes et entrelace les
-/// résultats (best-effort — l'échec d'une plateforme n'empêche pas l'autre).
-pub fn search_all(agent: &ureq::Agent, query: &str, per_platform: u32) -> Vec<Track> {
-    let sc = soundcloud::search(agent, query, per_platform).unwrap_or_default();
-    let mc = mixcloud::search(agent, query, per_platform).unwrap_or_default();
-    interleave(sc, mc)
+/// Résultat d'une requête multi-plateformes : morceaux fusionnés + échecs par
+/// plateforme. Best-effort : une plateforme en panne n'empêche pas l'autre, mais
+/// l'UI peut signaler l'échec au lieu d'afficher un « aucun résultat » trompeur.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Fetched {
+    pub tracks: Vec<Track>,
+    pub failures: Vec<(Platform, String)>,
+}
+
+/// Résultat d'une plateforme : `None` si elle n'a pas été interrogée (pas de
+/// compte configuré), sinon le résultat de l'appel.
+type PlatformResult = Option<Result<Vec<Track>, ProviderError>>;
+
+/// Interroge SoundCloud et Mixcloud **en parallèle** (threads scopés : pas de
+/// runtime async, pas de `'static`) puis entrelace les résultats. La latence
+/// perçue est celle de la plateforme la plus lente (max), et non plus la somme
+/// des deux comme avec l'ancien appel séquentiel.
+fn fan_out<S, M>(sc: S, mc: M) -> Fetched
+where
+    S: FnOnce() -> PlatformResult + Send,
+    M: FnOnce() -> PlatformResult + Send,
+{
+    let (sc, mc) = std::thread::scope(|scope| {
+        let a = scope.spawn(sc);
+        let b = scope.spawn(mc);
+        (a.join(), b.join())
+    });
+    let mut out = Fetched::default();
+    let mut take = |platform: Platform, r: std::thread::Result<PlatformResult>| match r {
+        Ok(Some(Ok(tracks))) => tracks,
+        Ok(Some(Err(e))) => {
+            out.failures.push((platform, e.to_string()));
+            Vec::new()
+        }
+        Ok(None) => Vec::new(),
+        Err(_) => {
+            out.failures.push((platform, "internal error".into()));
+            Vec::new()
+        }
+    };
+    let sc = take(Platform::SoundCloud, sc);
+    let mc = take(Platform::Mixcloud, mc);
+    out.tracks = interleave(sc, mc);
+    out
+}
+
+/// Recherche unifiée : interroge les deux plateformes en parallèle et entrelace
+/// les résultats (best-effort — l'échec d'une plateforme n'empêche pas l'autre).
+pub fn search_all(agent: &ureq::Agent, query: &str, per_platform: u32) -> Fetched {
+    fan_out(
+        || Some(soundcloud::search(agent, query, per_platform)),
+        || Some(mixcloud::search(agent, query, per_platform)),
+    )
 }
 
 /// Alterne les éléments de deux listes (a0, b0, a1, b1, …).
@@ -139,41 +186,34 @@ pub enum LibrarySection {
 }
 
 /// Charge une section de la bibliothèque de l'utilisateur (données publiques),
-/// en fusionnant SoundCloud et Mixcloud. Best-effort : une plateforme en échec
-/// ou non configurée n'empêche pas l'autre.
+/// en interrogeant SoundCloud et Mixcloud en parallèle puis en fusionnant.
+/// Best-effort : une plateforme en échec ou non configurée n'empêche pas l'autre.
 pub fn library(
     agent: &ureq::Agent,
     sc_handle: Option<&str>,
     mc_handle: Option<&str>,
     section: LibrarySection,
-) -> Vec<Track> {
-    let (mut sc, mut mc) = (Vec::new(), Vec::new());
-    match section {
-        LibrarySection::Likes => {
-            if let Some(h) = sc_handle {
-                sc = soundcloud::user_likes(agent, h, 50).unwrap_or_default();
-            }
-            if let Some(h) = mc_handle {
-                mc = mixcloud::user_favorites(agent, h, 50).unwrap_or_default();
-            }
-        }
-        LibrarySection::Playlists => {
-            if let Some(h) = sc_handle {
-                sc = soundcloud::user_playlist_tracks(agent, h, 20).unwrap_or_default();
-            }
-            if let Some(h) = mc_handle {
-                mc = mixcloud::user_playlist_tracks(agent, h, 5).unwrap_or_default();
-            }
-        }
-        LibrarySection::Feed => {
-            // Le fil SoundCloud exige OAuth : on utilise l'historique d'écoutes
-            // Mixcloud comme « fil » côté public.
-            if let Some(h) = mc_handle {
-                mc = mixcloud::user_listens(agent, h, 50).unwrap_or_default();
-            }
-        }
-    }
-    interleave(sc, mc)
+) -> Fetched {
+    fan_out(
+        || {
+            let h = sc_handle?;
+            Some(match section {
+                LibrarySection::Likes => soundcloud::user_likes(agent, h, 50),
+                LibrarySection::Playlists => soundcloud::user_playlist_tracks(agent, h, 20),
+                // Le fil SoundCloud exige OAuth : rien côté public.
+                LibrarySection::Feed => Ok(Vec::new()),
+            })
+        },
+        || {
+            let h = mc_handle?;
+            Some(match section {
+                LibrarySection::Likes => mixcloud::user_favorites(agent, h, 50),
+                LibrarySection::Playlists => mixcloud::user_playlist_tracks(agent, h, 5),
+                // L'historique d'écoutes Mixcloud sert de « fil » côté public.
+                LibrarySection::Feed => mixcloud::user_listens(agent, h, 50),
+            })
+        },
+    )
 }
 
 #[cfg(test)]
@@ -198,6 +238,32 @@ mod tests {
         let r = interleave(a, b);
         let titles: Vec<_> = r.iter().map(|t| t.title.as_str()).collect();
         assert_eq!(titles, ["s1", "m1", "s2"]);
+    }
+
+    #[test]
+    fn fan_out_fusionne_et_remonte_les_echecs() {
+        let mk = |p, n: &str| Track {
+            platform: p,
+            id: n.into(),
+            title: n.into(),
+            artist: "a".into(),
+            permalink: "u".into(),
+            duration_ms: None,
+        };
+        // SC répond, MC échoue : on garde les résultats SC et on signale MC.
+        let f = fan_out(
+            || Some(Ok(vec![mk(Platform::SoundCloud, "s1")])),
+            || Some(Err(ProviderError::Unavailable("down".into()))),
+        );
+        assert_eq!(f.tracks.len(), 1);
+        assert_eq!(f.failures.len(), 1);
+        assert_eq!(f.failures[0].0, Platform::Mixcloud);
+        assert!(f.failures[0].1.contains("down"));
+
+        // Plateforme non interrogée (pas de compte) : ni résultat ni échec.
+        let f = fan_out(|| None, || Some(Ok(vec![mk(Platform::Mixcloud, "m1")])));
+        assert_eq!(f.tracks.len(), 1);
+        assert!(f.failures.is_empty());
     }
 
     #[test]

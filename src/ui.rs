@@ -8,12 +8,13 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Cell, LineGauge, Paragraph, Row, Table, TableState,
+    Block, BorderType, Borders, Cell, Clear, LineGauge, Paragraph, Row, Table, TableState,
 };
 use ratatui::Frame;
 
 use crate::app::{App, Filter, Focus, Input, Section};
 use crate::i18n;
+use crate::keymap::{self, Group};
 use crate::model::{fmt_duration, Platform};
 use crate::theme::Theme;
 
@@ -29,6 +30,12 @@ pub struct Regions {
     pub list_len: usize,
     /// Bouton play/pause de la barre de lecture.
     pub playpause_btn: Rect,
+    /// Barre de lecture entière (molette = volume).
+    pub playbar: Rect,
+    /// Partie « trait » de la barre de progression (clic = saut).
+    pub progress: Rect,
+    /// Ligne « comptes (c) » de la sidebar (clic = connexion).
+    pub accounts_btn: Rect,
     /// Ligne de bascule de langue, en bas de la sidebar.
     pub lang_btn: Rect,
 }
@@ -66,6 +73,22 @@ impl Regions {
 
     pub fn lang_at(&self, x: u16, y: u16) -> bool {
         contains(&self.lang_btn, x, y)
+    }
+
+    pub fn accounts_at(&self, x: u16, y: u16) -> bool {
+        contains(&self.accounts_btn, x, y)
+    }
+
+    pub fn playbar_at(&self, x: u16, y: u16) -> bool {
+        contains(&self.playbar, x, y)
+    }
+
+    /// Position relative (0..1) d'un clic sur la barre de progression.
+    pub fn progress_ratio_at(&self, x: u16, y: u16) -> Option<f64> {
+        if self.progress.width == 0 || !contains(&self.progress, x, y) {
+            return None;
+        }
+        Some(f64::from(x - self.progress.x) / f64::from(self.progress.width))
     }
 }
 
@@ -110,6 +133,10 @@ pub fn draw(f: &mut Frame, app: &App, theme: &Theme) -> Regions {
     draw_list(f, body[1], app, theme, &mut regions);
     draw_playbar(f, root[2], app, theme, &mut regions);
     draw_status(f, root[3], app, theme);
+
+    if app.show_help {
+        draw_help(f, area, app, theme);
+    }
 
     regions
 }
@@ -174,14 +201,23 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut R
                 style = style.fg(theme.accent);
             }
         }
-        let label = format!(" {}", section.label(app.lang));
+        let mut label = format!(" {}", section.label(app.lang));
+        // La file affiche son nombre d'éléments : on sait d'un coup d'œil ce
+        // qui attend, sans l'ouvrir.
+        if *section == Section::Queue && !app.queue.is_empty() {
+            label.push_str(&format!(" ({})", app.queue.len()));
+        }
         f.render_widget(Paragraph::new(Span::styled(label, style)), row);
         reg.sidebar_rows.push(row);
     }
 
-    // Comptes connectés + langue, en bas de la sidebar.
-    if inner.height >= 5 {
-        let base = inner.y + inner.height - 4;
+    // Comptes connectés + langue, en bas de la sidebar — jamais par-dessus les
+    // sections : sur un terminal bas, le pied commence sous la dernière
+    // section et seules les lignes qui tiennent sont dessinées (`c` et `L`
+    // restent disponibles au clavier).
+    {
+        let sections_end = inner.y + (Section::ALL.len() as u16).min(inner.height);
+        let base = sections_end.max(inner.y + inner.height.saturating_sub(4));
         let sc = app.sc_handle.as_deref().unwrap_or("—");
         let mc = app.mc_handle.as_deref().unwrap_or("—");
         let lines = [
@@ -201,8 +237,10 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut R
             if y < inner.y + inner.height {
                 let row = Rect::new(inner.x, y, inner.width, 1);
                 f.render_widget(Paragraph::new(span), row);
-                if k == 3 {
-                    reg.lang_btn = row;
+                match k {
+                    0 => reg.accounts_btn = row,
+                    3 => reg.lang_btn = row,
+                    _ => {}
                 }
             }
         }
@@ -213,7 +251,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut Regi
     let active = app.focus == Focus::List;
     let title = format!(
         "{}  ·  {}",
-        app.section.label(app.lang).trim(),
+        app.section.name(app.lang),
         app.filter.label(app.lang)
     );
     let block = panel_block(&title, active, theme);
@@ -226,7 +264,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut Regi
 
     if visible.is_empty() {
         let hint = Paragraph::new(Line::from(Span::styled(
-            i18n::empty_list_hint(app.lang),
+            i18n::empty_hint(app.lang, app.section, app.has_account()),
             Style::default().fg(theme.dim),
         )));
         f.render_widget(hint, inner);
@@ -238,18 +276,18 @@ fn draw_list(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut Regi
     let first = scroll_first(app.list_index, visible.len(), height);
     reg.list_first = first;
 
+    let tracks = app.tracks();
     let rows: Vec<Row> = visible
         .iter()
-        .enumerate()
         .skip(first)
         .take(height)
-        .map(|(vis_i, &track_i)| {
-            let t = &app.tracks[track_i];
+        .map(|&track_i| {
+            let t = &tracks[track_i];
             let is_current = app
                 .playback
                 .current
                 .as_ref()
-                .map(|c| c.id == t.id && c.platform == t.platform)
+                .map(|c| c.same_as(t))
                 .unwrap_or(false);
             let marker = if is_current {
                 if app.playback.playing {
@@ -273,7 +311,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut Regi
                     .fg(theme.platform(t.platform))
                     .add_modifier(Modifier::BOLD),
             );
-            let row = Row::new(vec![
+            Row::new(vec![
                 Cell::from(Span::styled(format!("{marker}{}", t.title), title_style)),
                 Cell::from(Span::styled(
                     t.artist.clone(),
@@ -284,9 +322,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut Regi
                     Style::default().fg(theme.dim),
                 )),
                 Cell::from(plat),
-            ]);
-            let _ = vis_i;
-            row
+            ])
         })
         .collect();
 
@@ -315,6 +351,7 @@ fn draw_playbar(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut R
         .border_style(Style::default().fg(theme.border));
     let inner = block.inner(area);
     f.render_widget(block, area);
+    reg.playbar = area;
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -387,6 +424,15 @@ fn draw_playbar(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut R
         } else {
             "--:--".into()
         }
+    );
+    // Le trait de la jauge commence après le libellé et un espace : seule
+    // cette partie est cliquable pour sauter dans le morceau.
+    let label_w = label.chars().count() as u16 + 1;
+    reg.progress = Rect::new(
+        rows[2].x + label_w.min(rows[2].width),
+        rows[2].y,
+        rows[2].width.saturating_sub(label_w),
+        1,
     );
     let gauge = LineGauge::default()
         .filled_style(Style::default().fg(theme.accent))
@@ -549,11 +595,158 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         return;
     }
     let keys = i18n::keys_bar(app.lang);
-    let line = Line::from(vec![
-        Span::styled(format!(" {} ", app.status), Style::default().fg(theme.fg)),
-        Span::styled(format!("  {keys}"), Style::default().fg(theme.dim)),
-    ]);
-    f.render_widget(Paragraph::new(line), area);
+    let mut spans = Vec::with_capacity(3);
+    // Requête réseau en cours : un spinner animé devant le statut.
+    if let Some(p) = app.latest_pending() {
+        let elapsed = app.now().saturating_duration_since(p.started);
+        spans.push(Span::styled(
+            format!(" {}", spinner_frame(elapsed.as_millis() as u64)),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    spans.push(Span::styled(
+        format!(" {} ", app.status),
+        Style::default().fg(theme.fg),
+    ));
+    spans.push(Span::styled(
+        format!("  {keys}"),
+        Style::default().fg(theme.dim),
+    ));
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Image du spinner pour un temps écoulé donné (une image toutes les 80 ms).
+fn spinner_frame(elapsed_ms: u64) -> char {
+    SPINNER[(elapsed_ms / 80) as usize % SPINNER.len()]
+}
+
+/// Fenêtre d'aide centrée, générée depuis la table des raccourcis (`keymap`) :
+/// elle ne peut pas diverger de ce que fait réellement le clavier.
+///
+/// Deux colonnes équilibrées dès que la largeur le permet (tient dans un
+/// terminal de 24 lignes), une seule sinon.
+fn draw_help(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let key_style = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let title_style = Style::default().fg(theme.dim).add_modifier(Modifier::BOLD);
+    let text_style = Style::default().fg(theme.fg);
+    let lang = app.lang;
+
+    // Une rubrique = un titre + une ligne par raccourci (touches alignées).
+    let section = |title: &str, items: Vec<(String, &str)>| -> Vec<Line<'static>> {
+        let mut lines = vec![Line::from(Span::styled(title.to_string(), title_style))];
+        for (keys, desc) in items {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {keys:<9}"), key_style),
+                Span::styled(desc.to_string(), text_style),
+            ]));
+        }
+        lines
+    };
+    let group = |g: Group| -> Vec<Line<'static>> {
+        section(
+            g.title(lang),
+            keymap::in_group(g)
+                .map(|b| (b.keys_label(), b.help(lang)))
+                .collect(),
+        )
+    };
+    let mouse = section(
+        i18n::help_mouse_title(lang),
+        i18n::help_mouse_items(lang)
+            .iter()
+            .map(|(k, d)| (k.to_string(), *d))
+            .collect(),
+    );
+
+    // Répartition : à gauche navigation + listes + souris, à droite lecture +
+    // application — les deux colonnes font à peu près la même hauteur.
+    let mut left = group(Group::Navigate);
+    left.push(Line::default());
+    left.extend(group(Group::Lists));
+    left.push(Line::default());
+    left.extend(mouse);
+    let mut right = group(Group::Playback);
+    right.push(Line::default());
+    right.extend(group(Group::App));
+
+    // Deux colonnes dès 80 colonnes (descriptions entières), ou dès que la
+    // colonne unique ne tiendrait pas en hauteur : mieux vaut tronquer une
+    // description que cacher des rubriques entières.
+    let single_h = left.len() + right.len() + 1;
+    let two_cols = area.width >= 80 || single_h + 2 > usize::from(area.height.saturating_sub(1));
+    let (mut columns, content_h): (Vec<Vec<Line>>, u16) = if two_cols {
+        let h = left.len().max(right.len()) as u16;
+        (vec![left, right], h)
+    } else {
+        left.push(Line::default());
+        left.extend(right);
+        let h = left.len() as u16;
+        (vec![left], h)
+    };
+
+    let width = if two_cols { 96u16 } else { 52u16 }.min(area.width.saturating_sub(2));
+    // Repères de largeur : à 80 colonnes, chaque colonne garde 26 caractères
+    // pour la description (les libellés de `keymap` s'y tiennent).
+    let height = (content_h + 2).min(area.height.saturating_sub(1)).max(5);
+    let popup = Rect::new(
+        area.x + (area.width.saturating_sub(width)) / 2,
+        area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    );
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border_active))
+        .title(Span::styled(
+            format!(" {} ", i18n::help_title(lang)),
+            key_style,
+        ))
+        .title_bottom(
+            Line::from(Span::styled(
+                format!(" {} ", i18n::help_close(lang)),
+                Style::default().fg(theme.dim),
+            ))
+            .right_aligned(),
+        );
+    let inner = block.inner(popup);
+    f.render_widget(Clear, popup);
+    f.render_widget(block, popup);
+
+    // Ce qui ne tient pas est signalé sur la dernière ligne visible plutôt que
+    // coupé en silence.
+    let rows = usize::from(inner.height);
+    for col in columns.iter_mut() {
+        if col.len() > rows && rows > 0 {
+            col.truncate(rows - 1);
+            col.push(Line::from(Span::styled(
+                i18n::help_more(lang),
+                Style::default().fg(theme.dim),
+            )));
+        }
+    }
+
+    let n = columns.len() as u32;
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(vec![Constraint::Ratio(1, n); n as usize])
+        .split(inner);
+    for (col, lines) in columns.into_iter().enumerate() {
+        let r = Rect::new(
+            cols[col].x + 1,
+            cols[col].y,
+            cols[col].width.saturating_sub(1),
+            cols[col].height,
+        );
+        f.render_widget(Paragraph::new(lines), r);
+    }
 }
 
 /// Bloc encadré standard, surligné quand le panneau a le focus.
@@ -627,14 +820,18 @@ mod tests {
         use crate::theme::Theme;
 
         let mut app = App::new();
-        app.tracks = vec![Track {
-            platform: Platform::SoundCloud,
-            id: "1".into(),
-            title: "Mon Morceau Test".into(),
-            artist: "Artiste Test".into(),
-            permalink: "https://soundcloud.com/a/b".into(),
-            duration_ms: Some(200_000),
-        }];
+        app.restore(
+            Vec::new(),
+            Vec::new(),
+            vec![Track {
+                platform: Platform::SoundCloud,
+                id: "1".into(),
+                title: "Mon Morceau Test".into(),
+                artist: "Artiste Test".into(),
+                permalink: "https://soundcloud.com/a/b".into(),
+                duration_ms: Some(200_000),
+            }],
+        );
         let theme = Theme::dark();
 
         let backend = ratatui::backend::TestBackend::new(110, 30);
@@ -650,6 +847,194 @@ mod tests {
         assert!(text.contains("Likes"), "section Likes absente");
         assert!(text.contains("Mon Morceau Test"), "morceau absent");
         assert!(text.contains("Nothing playing"), "barre de lecture absente");
+    }
+
+    #[test]
+    fn la_fenetre_d_aide_liste_les_raccourcis() {
+        use crate::app::{Action, App};
+        use crate::theme::Theme;
+        let mut app = App::new();
+        app.apply(Action::ToggleHelp);
+        let theme = Theme::dark();
+        let backend = ratatui::backend::TestBackend::new(100, 40);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| {
+            super::draw(f, &app, &theme);
+        })
+        .unwrap();
+        let text = buffer_text(&term);
+        assert!(text.contains("Help"), "titre de l'aide absent");
+        assert!(text.contains("Navigate"), "rubrique absente");
+        assert!(
+            text.contains("add selection to queue"),
+            "raccourci 'a' absent"
+        );
+        assert!(text.contains("space"), "touche espace absente");
+    }
+
+    #[test]
+    fn la_file_affiche_son_compteur_et_les_zones_souris_sont_posees() {
+        use crate::app::App;
+        use crate::model::{Platform, Track};
+        use crate::theme::Theme;
+        let t = Track {
+            platform: Platform::Mixcloud,
+            id: "q".into(),
+            title: "Queued".into(),
+            artist: "A".into(),
+            permalink: "https://www.mixcloud.com/a/q/".into(),
+            duration_ms: Some(1_000),
+        };
+        let mut app = App::new();
+        app.restore(vec![t.clone(), t], Vec::new(), Vec::new());
+        app.sync_current(Some(Track {
+            platform: Platform::SoundCloud,
+            id: "now".into(),
+            title: "Now".into(),
+            artist: "B".into(),
+            permalink: "https://soundcloud.com/b/now".into(),
+            duration_ms: Some(100_000),
+        }));
+        let theme = Theme::dark();
+        let backend = ratatui::backend::TestBackend::new(110, 30);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        let mut regions = Regions::default();
+        term.draw(|f| {
+            regions = super::draw(f, &app, &theme);
+        })
+        .unwrap();
+        let text = buffer_text(&term);
+        assert!(
+            text.contains("Queue (2)"),
+            "compteur de file absent: {text}"
+        );
+        assert!(
+            regions.progress.width > 10,
+            "barre de progression non posée"
+        );
+        assert!(regions.playbar.height > 0);
+        assert!(regions.accounts_btn.height == 1);
+        // Un clic au milieu du trait donne un ratio ≈ 0,5.
+        let mid_x = regions.progress.x + regions.progress.width / 2;
+        let r = regions
+            .progress_ratio_at(mid_x, regions.progress.y)
+            .unwrap();
+        assert!((0.4..=0.6).contains(&r), "ratio {r}");
+        // Hors du trait (sur le libellé) : aucun saut.
+        assert!(regions
+            .progress_ratio_at(regions.progress.x - 1, regions.progress.y)
+            .is_none());
+    }
+
+    #[test]
+    fn l_aide_ne_panique_pas_a_la_taille_minimale_dessinable() {
+        use crate::app::{Action, App};
+        use crate::theme::Theme;
+        let mut app = App::new();
+        app.apply(Action::ToggleHelp);
+        let theme = Theme::dark();
+        for (w, h) in [(24, 14), (30, 15), (79, 20), (80, 24), (200, 60)] {
+            let backend = ratatui::backend::TestBackend::new(w, h);
+            let mut term = ratatui::Terminal::new(backend).unwrap();
+            term.draw(|f| {
+                super::draw(f, &app, &theme);
+            })
+            .unwrap();
+        }
+    }
+
+    /// Rend l'aide à une taille donnée et renvoie le texte de l'écran.
+    fn help_text(w: u16, h: u16, lang: crate::i18n::Lang) -> String {
+        use crate::app::{Action, App};
+        use crate::theme::Theme;
+        let mut app = App::new();
+        app.set_startup_lang(lang);
+        app.apply(Action::ToggleHelp);
+        let theme = Theme::dark();
+        let backend = ratatui::backend::TestBackend::new(w, h);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| {
+            super::draw(f, &app, &theme);
+        })
+        .unwrap();
+        buffer_text(&term)
+    }
+
+    #[test]
+    fn l_aide_montre_toutes_les_rubriques_sur_un_terminal_classique() {
+        use crate::i18n::Lang;
+        // 80×24 : deux colonnes, descriptions entières (dont la souris).
+        let t = help_text(80, 24, Lang::En);
+        for needle in [
+            "Navigate",
+            "Playback",
+            "Queue & history",
+            "App",
+            "Mouse",
+            "quit",
+            "volume",
+        ] {
+            assert!(t.contains(needle), "{needle:?} absent à 80×24 : {t}");
+        }
+        assert!(!t.contains("…"), "rien ne doit être tronqué à 80×24");
+        // 79×24 : une colonne ne tiendrait pas → deux colonnes quand même.
+        let t = help_text(79, 24, Lang::En);
+        assert!(t.contains("quit") && t.contains("Playback"), "{t}");
+        let t = help_text(60, 24, Lang::Fr);
+        assert!(t.contains("Lecture") && t.contains("quitter"), "{t}");
+        // Terminal minuscule : le débordement est signalé, pas caché.
+        let t = help_text(24, 14, Lang::En);
+        assert!(t.contains("…"), "marqueur de troncature attendu : {t}");
+    }
+
+    #[test]
+    fn le_pied_de_la_sidebar_ne_recouvre_pas_les_sections() {
+        use crate::app::App;
+        use crate::model::{Platform, Track};
+        use crate::theme::Theme;
+        let t = Track {
+            platform: Platform::Mixcloud,
+            id: "q".into(),
+            title: "Queued".into(),
+            artist: "A".into(),
+            permalink: "https://www.mixcloud.com/a/q/".into(),
+            duration_ms: Some(1_000),
+        };
+        let mut app = App::new();
+        app.restore(vec![t], Vec::new(), Vec::new());
+        let theme = Theme::dark();
+        for h in 14..=24u16 {
+            let backend = ratatui::backend::TestBackend::new(80, h);
+            let mut term = ratatui::Terminal::new(backend).unwrap();
+            let mut regions = Regions::default();
+            term.draw(|f| {
+                regions = super::draw(f, &app, &theme);
+            })
+            .unwrap();
+            let text = buffer_text(&term);
+            // Sous 17 lignes, la sidebar (hauteur − 11) ne peut plus montrer les
+            // six sections : seule l'absence de chevauchement est exigée.
+            if h >= 17 {
+                assert!(
+                    text.contains("Queue (1)"),
+                    "compteur de file masqué à 80×{h}"
+                );
+            }
+            for row in &regions.sidebar_rows {
+                assert!(
+                    !contains(&regions.accounts_btn, row.x, row.y)
+                        && !contains(&regions.lang_btn, row.x, row.y),
+                    "pied par-dessus une section à 80×{h}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn le_spinner_tourne_avec_le_temps() {
+        assert_eq!(spinner_frame(0), SPINNER[0]);
+        assert_eq!(spinner_frame(80), SPINNER[1]);
+        assert_eq!(spinner_frame(80 * 10), SPINNER[0]);
     }
 
     #[test]

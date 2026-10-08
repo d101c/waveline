@@ -186,9 +186,28 @@ pub fn resolve(agent: &ureq::Agent, url: &str) -> Result<(Track, StreamSource), 
     Ok((track, source))
 }
 
+/// Échappe une valeur pour l'insérer dans un littéral de chaîne GraphQL
+/// (`"..."`) : antislash et guillemet, plus les sauts de ligne par sûreté.
+fn graphql_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Exécute la requête `cloudcastLookup` et retourne l'objet cloudcast.
 fn query_cloudcast(agent: &ureq::Agent, user: &str, slug: &str) -> Result<Value, ProviderError> {
-    // serde échappe correctement les guillemets de la query GraphQL inline.
+    // `user`/`slug` viennent d'une URL saisie par l'utilisateur : on les échappe
+    // pour qu'un guillemet ne casse pas la requête. serde échappe ensuite le
+    // tout au niveau JSON.
+    let (user, slug) = (graphql_escape(user), graphql_escape(slug));
     let body = json!({
         "query": format!(
             "{{cloudcastLookup(lookup:{{username:\"{user}\",slug:\"{slug}\"}}){{name owner{{displayName username}} isExclusive restrictedReason audioLength streamInfo{{url hlsUrl dashUrl}}}}}}"
@@ -227,7 +246,10 @@ fn track_from_cc(cc: &Value, user: &str, slug: &str) -> Track {
         .map(|s| s * 1000);
     Track {
         platform: Platform::Mixcloud,
-        id: format!("{user}/{slug}"),
+        // Même forme que la `key` de l'API REST (`/user/slug/`, cf.
+        // `track_from_rest`) : `Track::same_as` doit reconnaître un morceau de
+        // liste dans celui que le moteur a résolu.
+        id: format!("/{user}/{slug}/"),
         title,
         artist,
         permalink: format!("https://www.mixcloud.com/{user}/{slug}/"),
@@ -337,6 +359,30 @@ mod tests {
             Some(("gilles".into(), "show".into()))
         );
         assert_eq!(parse_url("https://www.mixcloud.com/onlyuser/"), None);
+    }
+
+    #[test]
+    fn graphql_escape_neutralise_guillemets_et_antislash() {
+        assert_eq!(graphql_escape("plain-slug"), "plain-slug");
+        assert_eq!(graphql_escape(r#"a"b"#), r#"a\"b"#);
+        assert_eq!(graphql_escape(r"a\b"), r"a\\b");
+        assert_eq!(graphql_escape("a\nb"), r"a\nb");
+    }
+
+    #[test]
+    fn un_morceau_de_liste_est_reconnu_une_fois_resolu() {
+        // Liste (API REST) → permalink → résolution (GraphQL) : même identité.
+        let rest = track_from_rest(&serde_json::json!({
+            "key": "/NTSRadio/the-mix/",
+            "name": "The Mix",
+            "user": {"name": "NTS"},
+            "audio_length": 60
+        }))
+        .unwrap();
+        let (user, slug) = parse_url(&rest.permalink).unwrap();
+        let cc = track_from_cc(&serde_json::json!({"name": "The Mix"}), &user, &slug);
+        assert_eq!(rest.id, cc.id);
+        assert!(rest.same_as(&cc));
     }
 
     #[test]

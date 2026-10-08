@@ -82,6 +82,17 @@ impl Shared {
         *self.spectrum.lock().unwrap() = [0.0; BANDS];
         self.waveform.lock().unwrap().clear();
     }
+
+    /// Repasse à l'état « rien en lecture » : plus de morceau courant, position
+    /// et durée à zéro, visualiseurs vides. Utilisé par Stop (en lecture comme
+    /// au repos) et après un échec de résolution.
+    fn reset_track(&self) {
+        self.position_ms.store(0, Ordering::Relaxed);
+        self.duration_ms.store(0, Ordering::Relaxed);
+        self.seekable.store(false, Ordering::Relaxed);
+        *self.now.lock().unwrap() = None;
+        self.clear_spectrum();
+    }
 }
 
 /// Façade côté UI.
@@ -168,14 +179,22 @@ fn worker(rx: Receiver<Command>, shared: Arc<Shared>) {
                 match play_one(&agent, &rx, &shared, &url) {
                     Ok(true) => break, // un Quit est remonté pendant la lecture
                     Ok(false) => {}
-                    Err(e) => set_error(&shared, e),
+                    Err(e) => {
+                        // Échec de résolution/décodage : l'ancien morceau ne
+                        // doit pas rester affiché comme « en pause ».
+                        shared.reset_track();
+                        set_error(&shared, e);
+                    }
                 }
                 shared.playing.store(false, Ordering::Relaxed);
                 shared.loading.store(false, Ordering::Relaxed);
             }
             Command::Quit => break,
-            // Hors lecture : pause/resume/stop sont sans effet.
-            _ => {}
+            // Au repos après une fin naturelle, `now` garde le dernier morceau
+            // (l'UI s'en sert pour enchaîner) : Stop remet tout à zéro.
+            Command::Stop => shared.reset_track(),
+            // Hors lecture : pause/resume/seek sont sans effet.
+            Command::Pause | Command::Resume | Command::Seek(_) => {}
         }
     }
 }
@@ -320,10 +339,7 @@ fn decode_loop(
                     }
                 }
                 Some(Command::Stop) => {
-                    shared.position_ms.store(0, Ordering::Relaxed);
-                    shared.duration_ms.store(0, Ordering::Relaxed);
-                    *shared.now.lock().unwrap() = None;
-                    shared.clear_spectrum();
+                    shared.reset_track();
                     return Ok(Flow::Stopped);
                 }
                 Some(Command::Play(u)) => return Ok(Flow::Switch(u)),
@@ -432,5 +448,40 @@ fn push_mono(buf: &mut Vec<f32>, samples: &[i16], channels: usize) {
 fn set_error(shared: &Arc<Shared>, msg: String) {
     if !msg.is_empty() {
         *shared.error.lock().unwrap() = Some(msg);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Platform, Track};
+
+    #[test]
+    fn stop_au_repos_efface_le_morceau_courant() {
+        let player = Player::new(50);
+        let shared = player.shared().clone();
+        // Simule l'état laissé par une fin naturelle : `now` garni, moteur au repos.
+        *shared.now.lock().unwrap() = Some(Track {
+            platform: Platform::SoundCloud,
+            id: "x".into(),
+            title: "t".into(),
+            artist: "a".into(),
+            permalink: "https://soundcloud.com/a/t".into(),
+            duration_ms: Some(1_000),
+        });
+        shared.position_ms.store(1_000, Ordering::Relaxed);
+        shared.duration_ms.store(1_000, Ordering::Relaxed);
+        player.stop();
+        // Le worker traite la commande de façon asynchrone : on attend un peu.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while shared.now.lock().unwrap().is_some() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            shared.now.lock().unwrap().is_none(),
+            "now doit être vidé par Stop au repos"
+        );
+        assert_eq!(shared.position_ms.load(Ordering::Relaxed), 0);
+        assert_eq!(shared.duration_ms.load(Ordering::Relaxed), 0);
     }
 }

@@ -1,6 +1,7 @@
 # waveline — conception
 
-*Statut : MVP « cœur jouable » implémenté. Document de référence tenu à jour.*
+*Statut : 0.2.0 — cœur jouable, comptes publics, file d'attente et historique
+persistés, aide intégrée. Document de référence tenu à jour.*
 
 ## Objectif
 
@@ -31,16 +32,57 @@ dépendances possibles**, utilisable **avec et sans compte**.
 Séparation stricte état / rendu / I/O :
 
 - **`app`** — état pur, sans I/O, entièrement testable. `apply(Action) ->
-  Option<Effect>`. Les effets (`Play`, `Toggle`, `Stop`, `SetVolume`, `Search`)
-  sont exécutés à l'extérieur.
+  Option<Effect>` est l'**unique** point d'entrée (clavier, souris, MPRIS).
+  Les effets (`Play`, `Toggle`, `Stop`, `SetVolume`, `Seek`, `Fetch`,
+  `SaveConfig`) sont exécutés à l'extérieur. Le temps est **injecté** une fois
+  par frame (`tick(now)`) : accélération du saut et spinner sont déterministes
+  en test. Une liste par section ; la file et l'historique en sont deux,
+  éditables, dont les mutations lèvent un indicateur « état modifié » relevé
+  par la boucle (une mutation peut ainsi accompagner un effet audio).
+- **`keymap`** — table unique touches → `Action`, avec la description de
+  chaque raccourci. Elle sert au dispatch **et** au rendu de l'aide : l'aide
+  ne peut pas diverger du clavier.
 - **`ui`** — rend l'état et retourne les **zones cliquables** (`Regions`) pour
-  le hit-test souris.
-- **`main`** — cycle terminal, événements clavier/souris → `Action`, exécution
-  des `Effect` sur le moteur, resynchronisation de l'affichage.
-- **`providers`** — `Track` unifié ; `resolve_url` et `search_all` cachent les
-  différences SC/MC derrière une interface commune.
+  le hit-test souris ; dessine l'aide en surimpression (`Clear` + bloc).
+- **`main`** — cycle terminal (avec hook de panique restaurateur), événements
+  clavier/souris/collage → `Action`, exécution des `Effect`, resynchronisation
+  de l'affichage, persistance.
+- **`providers`** — `Track` unifié ; `resolve_url`, `search_all` et `library`
+  cachent les différences SC/MC. Les deux plateformes sont interrogées **en
+  parallèle** (threads scopés) et le résultat `Fetched { tracks, failures }`
+  remonte l'échec d'une plateforme au lieu de le taire.
 - **`audio`** — un thread worker : résolution → décodage symphonia → `Sink`.
   État partagé (atomics + mutex) lu par l'UI sans blocage.
+- **`config`** / **`state`** — préférences (`~/.config/waveline/config.json`)
+  séparées des données d'usage (`~/.local/share/waveline/state.json`), toutes
+  deux écrites atomiquement (fichier temporaire + `rename`) et seulement si
+  elles ont changé. La config, éditable à la main, est lue champ par champ
+  (une valeur invalide reprend son défaut) ; un fichier illisible est mis de
+  côté en `.bak`, jamais écrasé.
+
+### Requêtes asynchrones sans runtime
+
+Une requête réseau reçoit un **numéro de génération** (`Effect::Fetch { id }`).
+Le thread qui l'exécute renvoie `(id, Fetched)` sur un canal ; `App::deliver`
+ignore tout `id` qui n'est plus celui attendu. Une réponse en retard ne peut
+donc jamais écraser une liste plus récente — sans annulation de thread ni
+machinerie async.
+
+### File d'attente et enchaînement
+
+À la fin d'un morceau (ou sur `n`), la file a priorité ; sinon on avance depuis
+le **morceau en cours** s'il est dans la liste affichée (pas depuis le curseur,
+que l'utilisateur a pu déplacer). Aux bornes, rien n'est joué : le dernier
+titre ne boucle pas et le moteur est explicitement arrêté (« Nothing
+playing »), pour qu'espace/`p`/`s` restent réactifs. `p` au-delà de 3 s
+redémarre le morceau. Jouer un morceau *depuis la file* le consomme, quel que
+soit le geste (Entrée, espace, `p`).
+
+L'historique est « le plus récent en tête », sauf quand on écoute **depuis la
+vue Historique** : la liste affichée reste alors stable (pas de remontée en
+tête), sinon « suivant » rejouerait indéfiniment les deux premières entrées.
+L'identité d'un morceau (`Track::same_as`) compare plateforme + identifiant,
+avec repli sur le permalink (morceaux de démo, URL collée).
 
 ## Modèle de données
 
@@ -60,8 +102,10 @@ Pause = coupe le `Sink` en gardant le décodeur ; reprise = ré-ouvre le `Sink`.
 
 - **Sans compte (livré)** : URLs publiques (`:`) et recherche unifiée (`/`) via
   `client_id` public (SC) et API REST publique (MC).
-- **Avec compte (roadmap)** : OAuth optionnel pour likes/playlists/abonnements,
-  derrière la même interface `Provider` ; tokens chiffrés localement.
+- **Avec compte public (livré)** : pseudos SoundCloud/Mixcloud (`c`) → Likes,
+  Playlists, Feed depuis les données publiques. Aucun secret stocké.
+- **Avec compte privé (roadmap)** : OAuth optionnel pour les likes privés,
+  derrière la même interface ; tokens chiffrés localement.
 
 ## Risques & résilience
 
@@ -73,8 +117,13 @@ Pause = coupe le `Sink` en gardant le décodeur ; reprise = ré-ouvre le `Sink`.
 
 ## Tests
 
-- Unitaires purs : navigation, filtre, volume, saisie, base64, m3u8, scoring
-  transcoding, XOR, parsing d'URL, entrelacement.
-- Rendu : `TestBackend` (vérifie les zones affichées) + anti-panic petites
-  tailles.
+- Unitaires purs : navigation, pagination, filtre, volume, saisie (dont
+  Ctrl-U/W), file d'attente (priorité, consommation), historique
+  (déduplication, plafond), enchaînement aux bornes, redémarrage sur `p`,
+  requêtes périmées, bilan d'échec par plateforme, accélération du saut avec
+  temps injecté, base64, m3u8, scoring transcoding, XOR, échappement GraphQL,
+  parsing d'URL, entrelacement, fan-out, persistance (round-trip, écriture
+  atomique), keymap (sans conflit, libellés courts).
+- Rendu : `TestBackend` (zones affichées, compteur de file, zones souris,
+  fenêtre d'aide en deux et une colonnes) + anti-panic petites tailles.
 - Live (modes debug) : `resolve` / `play` / `search` validés sur SC et MC.

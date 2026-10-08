@@ -1,6 +1,6 @@
 [package]
 name = "waveline"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 description = "Unified TUI for listening to Mixcloud & SoundCloud from the console — clickable, vim keybindings, spectrum analyzer, media keys (MPRIS)"
 license = "MIT"
@@ -9,7 +9,7 @@ homepage = "https://github.com/d101c/waveline"
 readme = "README.md"
 keywords = ["tui", "soundcloud", "mixcloud", "music", "player"]
 categories = ["multimedia::audio", "command-line-utilities"]
-exclude = ["npm/", "assets/", "docs/", ".github/"]
+exclude = ["npm/", "assets/", "docs/", "scripts/", ".github/"]
 
 [[bin]]
 name = "waveline"

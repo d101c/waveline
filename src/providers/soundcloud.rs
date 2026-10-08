@@ -4,9 +4,9 @@
 //! Pipeline : client_id → `/resolve` → choix transcoding → URL signée →
 //! progressive (mp3 direct) ou HLS (segments).
 
-use std::cell::RefCell;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use serde_json::Value;
 
@@ -16,9 +16,20 @@ use crate::model::{Platform, Track};
 
 const API: &str = "https://api-v2.soundcloud.com";
 
-thread_local! {
-    /// Cache mémoire du client_id pour éviter de re-scraper à chaque appel.
-    static CLIENT_ID: RefCell<Option<String>> = const { RefCell::new(None) };
+/// Cache mémoire du client_id, partagé par tout le processus. Les recherches et
+/// chargements de bibliothèque tournent chacun dans un thread éphémère : un
+/// cache par thread serait vide à chaque fois et relirait le disque (voire
+/// re-scraperait) à chaque appel.
+static CLIENT_ID: Mutex<Option<String>> = Mutex::new(None);
+
+fn cached_client_id() -> Option<String> {
+    CLIENT_ID.lock().ok().and_then(|c| c.clone())
+}
+
+fn set_cached_client_id(id: Option<String>) {
+    if let Ok(mut c) = CLIENT_ID.lock() {
+        *c = id;
+    }
 }
 
 fn cache_path() -> Option<PathBuf> {
@@ -27,14 +38,14 @@ fn cache_path() -> Option<PathBuf> {
 
 /// Renvoie un client_id valide : mémoire → disque → scraping du site.
 pub fn client_id(agent: &ureq::Agent) -> Result<String, ProviderError> {
-    if let Some(id) = CLIENT_ID.with(|c| c.borrow().clone()) {
+    if let Some(id) = cached_client_id() {
         return Ok(id);
     }
     if let Some(p) = cache_path() {
         if let Ok(s) = fs::read_to_string(&p) {
             let s = s.trim().to_string();
             if s.len() >= 16 {
-                CLIENT_ID.with(|c| *c.borrow_mut() = Some(s.clone()));
+                set_cached_client_id(Some(s.clone()));
                 return Ok(s);
             }
         }
@@ -46,14 +57,14 @@ pub fn client_id(agent: &ureq::Agent) -> Result<String, ProviderError> {
 
 /// Invalide le client_id en cache (à appeler sur 401/403) pour forcer un re-scrap.
 pub fn invalidate_client_id() {
-    CLIENT_ID.with(|c| *c.borrow_mut() = None);
+    set_cached_client_id(None);
     if let Some(p) = cache_path() {
         let _ = fs::remove_file(p);
     }
 }
 
 fn store_client_id(id: &str) {
-    CLIENT_ID.with(|c| *c.borrow_mut() = Some(id.to_string()));
+    set_cached_client_id(Some(id.to_string()));
     if let Some(p) = cache_path() {
         if let Some(parent) = p.parent() {
             let _ = fs::create_dir_all(parent);
@@ -134,18 +145,45 @@ fn extract_client_id(js: &str) -> Option<String> {
     None
 }
 
-/// Recherche de morceaux (mode public, sans compte).
-pub fn search(agent: &ureq::Agent, query: &str, limit: u32) -> Result<Vec<Track>, ProviderError> {
+/// Exécute `f` avec le client_id courant ; sur 401/403 (identifiant périmé,
+/// SoundCloud renouvelle ses bundles régulièrement), invalide le cache,
+/// re-scrape et réessaie une fois. Toute requête api-v2 passe par ici : sans
+/// cela, seule la lecture réparait le cache et la recherche restait en panne
+/// jusqu'au prochain morceau joué.
+fn with_client_id<T>(
+    agent: &ureq::Agent,
+    f: impl Fn(&str) -> Result<T, ProviderError>,
+) -> Result<T, ProviderError> {
     let cid = client_id(agent)?;
-    let v: Value = agent
-        .get(&format!("{API}/search/tracks"))
-        .query("q", query)
-        .query("client_id", &cid)
-        .query("limit", &limit.to_string())
-        .call()
+    match f(&cid) {
+        Err(ProviderError::Http(HttpError::Status(401 | 403, _))) => {
+            invalidate_client_id();
+            let cid = client_id(agent)?;
+            f(&cid)
+        }
+        other => other,
+    }
+}
+
+/// Lit la réponse JSON d'une requête api-v2.
+fn get_json(req: ureq::Request) -> Result<Value, ProviderError> {
+    req.call()
         .map_err(HttpError::from)?
         .into_json()
-        .map_err(|e| ProviderError::Http(HttpError::Decode(e.to_string())))?;
+        .map_err(|e| ProviderError::Http(HttpError::Decode(e.to_string())))
+}
+
+/// Recherche de morceaux (mode public, sans compte).
+pub fn search(agent: &ureq::Agent, query: &str, limit: u32) -> Result<Vec<Track>, ProviderError> {
+    let v = with_client_id(agent, |cid| {
+        get_json(
+            agent
+                .get(&format!("{API}/search/tracks"))
+                .query("q", query)
+                .query("client_id", cid)
+                .query("limit", &limit.to_string()),
+        )
+    })?;
     let items = v
         .get("collection")
         .and_then(|c| c.as_array())
@@ -159,19 +197,18 @@ pub fn search(agent: &ureq::Agent, query: &str, limit: u32) -> Result<Vec<Track>
 
 /// Résout un profil `soundcloud.com/<handle>` vers son identifiant numérique.
 pub fn resolve_user_id(agent: &ureq::Agent, handle: &str) -> Result<i64, ProviderError> {
-    let cid = client_id(agent)?;
     let url = format!("https://soundcloud.com/{}", handle.trim_matches('/'));
-    let v: Value = agent
-        .get(&format!("{API}/resolve"))
-        .query("url", &url)
-        .query("client_id", &cid)
-        .call()
-        .map_err(HttpError::from)?
-        .into_json()
-        .map_err(|e| ProviderError::Http(HttpError::Decode(e.to_string())))?;
+    let v = with_client_id(agent, |cid| {
+        get_json(
+            agent
+                .get(&format!("{API}/resolve"))
+                .query("url", &url)
+                .query("client_id", cid),
+        )
+    })?;
     if v.get("kind").and_then(|k| k.as_str()) != Some("user") {
         return Err(ProviderError::Unavailable(format!(
-            "« {handle} » n'est pas un profil SoundCloud"
+            "\"{handle}\" is not a SoundCloud profile"
         )));
     }
     v.get("id")
@@ -186,16 +223,15 @@ pub fn user_likes(
     limit: u32,
 ) -> Result<Vec<Track>, ProviderError> {
     let id = resolve_user_id(agent, handle)?;
-    let cid = client_id(agent)?;
-    let v: Value = agent
-        .get(&format!("{API}/users/{id}/track_likes"))
-        .query("client_id", &cid)
-        .query("limit", &limit.to_string())
-        .query("linked_partitioning", "1")
-        .call()
-        .map_err(HttpError::from)?
-        .into_json()
-        .map_err(|e| ProviderError::Http(HttpError::Decode(e.to_string())))?;
+    let v = with_client_id(agent, |cid| {
+        get_json(
+            agent
+                .get(&format!("{API}/users/{id}/track_likes"))
+                .query("client_id", cid)
+                .query("limit", &limit.to_string())
+                .query("linked_partitioning", "1"),
+        )
+    })?;
     Ok(collection_tracks(&v))
 }
 
@@ -206,16 +242,15 @@ pub fn user_playlist_tracks(
     limit: u32,
 ) -> Result<Vec<Track>, ProviderError> {
     let id = resolve_user_id(agent, handle)?;
-    let cid = client_id(agent)?;
-    let v: Value = agent
-        .get(&format!("{API}/users/{id}/playlists"))
-        .query("client_id", &cid)
-        .query("limit", &limit.to_string())
-        .query("linked_partitioning", "1")
-        .call()
-        .map_err(HttpError::from)?
-        .into_json()
-        .map_err(|e| ProviderError::Http(HttpError::Decode(e.to_string())))?;
+    let v = with_client_id(agent, |cid| {
+        get_json(
+            agent
+                .get(&format!("{API}/users/{id}/playlists"))
+                .query("client_id", cid)
+                .query("limit", &limit.to_string())
+                .query("linked_partitioning", "1"),
+        )
+    })?;
     let mut out = Vec::new();
     if let Some(playlists) = v.get("collection").and_then(|c| c.as_array()) {
         for p in playlists {
@@ -247,16 +282,8 @@ fn collection_tracks(v: &Value) -> Vec<Track> {
 
 /// Résout une URL SoundCloud vers (Track, flux jouable).
 pub fn resolve(agent: &ureq::Agent, url: &str) -> Result<(Track, StreamSource), ProviderError> {
-    let cid = client_id(agent)?;
-    let track_json = match resolve_json(agent, url, &cid) {
-        Err(ProviderError::Http(HttpError::Status(401 | 403, _))) => {
-            // client_id périmé : on réessaie une fois après re-scrap.
-            invalidate_client_id();
-            let cid2 = client_id(agent)?;
-            resolve_json(agent, url, &cid2)?
-        }
-        other => other?,
-    };
+    let track_json = with_client_id(agent, |cid| resolve_json(agent, url, cid))?;
+    // L'identifiant est frais ici (éventuellement re-scrapé juste au-dessus).
     let cid = client_id(agent)?;
     let track = track_from_json(&track_json)?;
     let source = pick_stream(agent, &track_json, &cid)?;
@@ -264,14 +291,12 @@ pub fn resolve(agent: &ureq::Agent, url: &str) -> Result<(Track, StreamSource), 
 }
 
 fn resolve_json(agent: &ureq::Agent, url: &str, cid: &str) -> Result<Value, ProviderError> {
-    let v: Value = agent
-        .get(&format!("{API}/resolve"))
-        .query("url", url)
-        .query("client_id", cid)
-        .call()
-        .map_err(HttpError::from)?
-        .into_json()
-        .map_err(|e| ProviderError::Http(HttpError::Decode(e.to_string())))?;
+    let v = get_json(
+        agent
+            .get(&format!("{API}/resolve"))
+            .query("url", url)
+            .query("client_id", cid),
+    )?;
     if v.get("media").is_none() && v.get("kind").and_then(|k| k.as_str()) != Some("track") {
         return Err(ProviderError::Unavailable(
             "URL does not point to a playable track".into(),
@@ -466,7 +491,7 @@ fn expand_hls(agent: &ureq::Agent, m3u8_url: &str) -> Result<Vec<String>, Provid
         hls::Playlist::Master(variants) => {
             let first = variants
                 .first()
-                .ok_or_else(|| ProviderError::Malformed("master m3u8 vide".into()))?;
+                .ok_or_else(|| ProviderError::Malformed("empty master m3u8".into()))?;
             let text2 = agent
                 .get(first)
                 .call()
