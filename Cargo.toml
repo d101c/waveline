@@ -1,6 +1,6 @@
 [package]
 name = "waveline"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 description = "Unified TUI for listening to Mixcloud & SoundCloud from the console — clickable, vim keybindings, spectrum analyzer, media keys (MPRIS)"
 license = "MIT"

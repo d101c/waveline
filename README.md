@@ -57,25 +57,35 @@ listen to both in one place, with the mouse **or** the keyboard.
 
 ## Features
 
-- **Two platforms, one interface** — a unified model, interleaved search.
+- **Two platforms, one interface** — a unified model, interleaved search,
+  both platforms queried in parallel.
 - **Native playback** — 100% Rust decoding (`symphonia`: MP3, AAC/MP4), output
   via PipeWire (`pw-play`) or ALSA (`aplay`). No external player required.
 - **Clickable AND keyboard-driven** — click a track to play it, click the
-  filter tabs, the play/pause bar; or drive it entirely with vim-style keys.
+  filter tabs or the play/pause button, click the progress bar to seek, scroll
+  on the playbar for volume; or drive everything with vim-style keys.
+- **Queue & history** — `a` queues the selection; `n` and auto-advance read
+  the queue first. Every track you play lands in **History**, which is where
+  waveline reopens next time. Both survive restarts.
 - **Built-in, reactive visualizers** — 3 styles cycled with `v`: spectrum
   bars, mirror ("waveline"), oscilloscope. A hand-rolled FFT at ~30 Hz,
   rendered at ~30 fps during playback, negligible CPU cost.
 - **Media keys & desktop controls** — via MPRIS (D-Bus): Play/Pause, Next,
-  Previous, Stop from the keyboard's media keys, the GNOME panel, and the
-  lock screen; title/artist/duration are shown there too.
+  Previous, Stop, Seek from the keyboard's media keys, the GNOME panel, and
+  the lock screen; title/artist/duration are shown there too.
 - **With or without an account** — no login needed: public URLs + search.
   With an account: enter your SoundCloud/Mixcloud **handle** (key `c`) and
   your **Likes / Playlists / Feed** populate from public data — no OAuth, no
   token, nothing sensitive stored.
+- **Help that can't go stale** — `?` opens a help window generated from the
+  very same key table the app dispatches on.
 - **Standalone, few dependencies** — a single binary, pure-Rust HTTP
   (`ureq`+rustls), no `tokio`, no system OpenSSL, no `yt-dlp`.
+- **Remembers you** — language, volume, visualizer style and accounts are
+  kept in `~/.config/waveline/config.json`; queue and history in
+  `~/.local/share/waveline/state.json` (written atomically).
 - **English by default, French on demand** — switch language with `L` or a
-  click in the sidebar; the choice is remembered across sessions.
+  click in the sidebar.
 
 ## Installation
 
@@ -91,19 +101,34 @@ cargo build --release
 
 ## Usage
 
-Launch `waveline`, then:
+Launch `waveline`, then press `?` at any time for the full key reference.
 
 | Key | Action | | Key | Action |
 |---|---|---|---|---|
 | `j` / `k` or `↑`/`↓` | navigate | | `/` | search (SC + MC) |
-| `Enter` / click | play the selection | | `:` | paste a URL and play |
-| `Space` | play / pause | | `c` | connect your accounts |
-| `n` / `p` | next / previous | | `v` | cycle the visualizer |
-| `s` | stop | | `1` `2` `3` | filter All / SC / MC |
-| `+` / `-` | volume | | `Tab` | switch panel |
-| `g` / `G` | top / bottom of list | | `L` | switch language (EN/FR) |
-| | | | `q` | quit |
-| | | | `?` | help |
+| `Ctrl-d` / `Ctrl-u` | half page down / up | | `:` | paste a URL and play |
+| `g` / `G` | top / bottom of list | | `c` | connect your accounts |
+| `Enter` / click | play the selection | | `a` | add selection to the queue |
+| `Space` | play / pause | | `x` / `X` | remove / clear (queue, history) |
+| `n` / `p` | next (queue first) / previous or restart | | `v` | cycle the visualizer |
+| `h` / `l` or `←`/`→` | seek ±10s, repeat to accelerate | | `1` `2` `3` | filter All / SC / MC |
+| `s` | stop | | `Tab` | switch panel |
+| `+` / `-` | volume | | `L` | switch language (EN/FR) |
+| `?` | help | | `q` | quit |
+
+Mouse: click a track or a section, click the filter tabs, click the progress
+bar to seek, scroll over the playbar to change the volume. Pasting a
+SoundCloud/Mixcloud link anywhere opens the `:` prompt pre-filled.
+
+### Queue and history
+
+Press `a` on any track to append it to the **Queue**; the sidebar shows how
+many tracks are waiting. When a track ends (or you press `n`), the queue is
+played first, then the list continues after the current track. Playing a
+queued track from the Queue view consumes it. Everything you play is recorded
+in **History** (most recent first, deduplicated, 200 entries), and waveline
+reopens on History so you can pick up where you left off. In either view,
+`x` removes the selection and `X` clears the list.
 
 ### Connecting your accounts
 
@@ -111,7 +136,8 @@ Press `c`, enter your **SoundCloud handle** (Enter), then your **Mixcloud
 handle** (Enter). Handles are remembered in
 `~/.config/waveline/config.json`. Then open **Likes**, **Playlists**, or
 **Feed** in the sidebar: your public data from both platforms is merged
-there. No password or token — only public handles.
+there. No password or token — only public handles. Each section keeps its
+own list, so switching between Search and Likes is instant.
 
 ### Command-line (debug) modes
 
@@ -120,18 +146,20 @@ waveline resolve <url>          # print the resolved stream for a URL
 waveline play <url> [seconds]   # play the stream for N seconds (engine test)
 waveline search <query>         # unified SC + MC search
 waveline lib <likes|playlists|feed> <sc_handle|-> <mc_handle|->
+waveline --version
 ```
 
 ## Architecture
 
 ```
 src/
-├── main.rs         terminal lifecycle, event loop, effect wiring
+├── main.rs         terminal lifecycle, event loop, effect execution
 ├── app.rs          pure state + logic (testable, no I/O) → emits Effect
-├── ui.rs           ratatui rendering + clickable-zone mapping
+├── keymap.rs       the single key table: drives dispatch AND the help window
+├── ui.rs           ratatui rendering + clickable-zone mapping + help overlay
 ├── i18n.rs         UI language (English default, French on demand)
 ├── model.rs        unified Track (SoundCloud ⇄ Mixcloud)
-├── providers/      stream resolution & search
+├── providers/      stream resolution & search (SC + MC queried in parallel)
 │   ├── soundcloud.rs   scraped client_id, /resolve, transcodings
 │   ├── mixcloud.rs     GraphQL cloudcastLookup, XOR decryption
 │   └── hls.rs          m3u8 parsing
@@ -140,17 +168,21 @@ src/
 │   ├── source.rs   progressive HTTP / HLS sources for symphonia
 │   ├── sink.rs     PCM output via pw-play / aplay
 │   └── spectrum.rs hand-rolled radix-2 FFT + bands (analyzer)
-├── config.rs       account handles & language (~/.config/waveline)
-├── mpris.rs        MPRIS server (D-Bus): media keys, desktop controls
-├── http.rs         shared ureq agent (browser UA)
+├── config.rs       preferences: handles, language, volume, visualizer
+├── state.rs        usage data: queue & history (atomic JSON writes)
+├── mpris.rs        MPRIS server (D-Bus): media keys, desktop controls, seek
+├── http.rs         one shared ureq agent (keep-alive pool, browser UA)
 └── b64.rs          base64 decoder (for the Mixcloud XOR)
 ```
 
 `App` performs no I/O: it mutates its state and returns `Effect`s (playback,
-search) that `main.rs` executes on the engine. The engine runs in a thread
-and publishes its state (position, duration, playing/paused) that the UI
-reads back each frame. This split makes all navigation testable without a
-terminal.
+network fetch, config save) that `main.rs` executes. Time is injected once per
+frame (`App::tick`), so seek acceleration and the busy spinner are
+deterministic in tests. Network requests carry a generation id: a late
+response can never overwrite newer results. The engine runs in a thread and
+publishes its state (position, duration, playing/paused) that the UI reads
+back each frame. A panic hook restores the terminal before any error is
+printed. This split makes all navigation testable without a terminal.
 
 ## Known limitations
 
@@ -167,10 +199,11 @@ terminal.
 
 - [x] **Account mode** by public handle (Likes / Playlists / Feed).
 - [x] Built-in spectrum analyzer.
-- [x] Media keys / desktop controls via MPRIS (D-Bus).
+- [x] Media keys / desktop controls via MPRIS (D-Bus), including seek.
 - [x] English/French UI language switch.
+- [x] Persistent queue and history.
+- [x] Help window generated from the key table.
 - [ ] *Private* SoundCloud Likes via a pasted `oauth_token` (optional, outside ToS).
-- [ ] Persistent queue and history.
 - [ ] Command palette (`Ctrl-P`) and themes.
 - [ ] Non-DRM AES-128 encrypted HLS and gapless preloading.
 
