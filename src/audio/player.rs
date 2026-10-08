@@ -163,10 +163,12 @@ impl Player {
 
 impl Drop for Player {
     fn drop(&mut self) {
+        // On ne joint pas le worker : s'il est bloqué dans une résolution
+        // réseau (jusqu'à 30 s de timeout), joindre figerait la sortie du
+        // programme avant la restauration du terminal. Le thread se termine
+        // avec le processus.
         let _ = self.tx.send(Command::Quit);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
+        self.handle.take();
     }
 }
 

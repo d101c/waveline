@@ -787,13 +787,24 @@ impl App {
         }
     }
 
-    /// Position (dans la liste visible) du morceau en cours, s'il y figure.
+    /// Position (dans la liste visible) du morceau en cours, s'il y figure :
+    /// le curseur s'il pointe déjà dessus (une liste peut contenir deux fois le
+    /// même mix : s'ancrer sur la première occurrence ferait boucler), sinon
+    /// la première occurrence. Un morceau venu de la file ne figure pas dans
+    /// la liste à l'endroit où l'on écoutait : on repart alors du curseur.
     fn current_visible_pos(&self) -> Option<usize> {
         let cur = self.playback.current.as_ref()?;
+        if self.launched_from == Some(Section::Queue) && self.section == Section::History {
+            return None;
+        }
         let tracks = self.tracks();
-        self.visible_indices()
-            .iter()
-            .position(|&i| tracks[i].same_as(cur))
+        let vis = self.visible_indices();
+        if let Some(&i) = vis.get(self.list_index) {
+            if tracks[i].same_as(cur) {
+                return Some(self.list_index);
+            }
+        }
+        vis.iter().position(|&i| tracks[i].same_as(cur))
     }
 
     /// Piste suivante (`delta` > 0) ou précédente : la file d'attente a la
@@ -899,11 +910,22 @@ impl App {
         {
             return;
         }
-        self.history.retain(|h| !h.same_as(&t));
+        // Si la vue Historique est affichée, le curseur suit le morceau qu'il
+        // désigne malgré le retrait/l'insertion en tête.
+        let shown = self.section == Section::History;
+        if let Some(pos) = self.history.iter().position(|h| h.same_as(&t)) {
+            self.history.remove(pos);
+            if shown && pos < self.list_index {
+                self.list_index -= 1;
+            }
+        }
         self.history.insert(0, t);
+        if shown && self.history.len() > 1 {
+            self.list_index += 1;
+        }
         self.history.truncate(HISTORY_CAP);
         self.state_dirty = true;
-        if self.section == Section::History {
+        if shown {
             self.clamp_cursor();
         }
     }
@@ -1538,6 +1560,60 @@ mod tests {
             Some(Effect::Play("https://soundcloud.com/x/first".into()))
         );
         assert_eq!(a.queue.len(), 1, "l'entrée jouée a été consommée");
+    }
+
+    #[test]
+    fn une_liste_avec_le_meme_mix_deux_fois_ne_boucle_pas() {
+        let (x, y) = (
+            track(Platform::Mixcloud, "x"),
+            track(Platform::Mixcloud, "y"),
+        );
+        let mut a = App::new();
+        a.restore(vec![], vec![], vec![x.clone(), x.clone(), y.clone()]);
+        a.apply(Action::Activate);
+        a.sync_current(Some(x.clone()));
+        assert_eq!(
+            a.apply(Action::Next),
+            Some(Effect::Play(x.permalink.clone()))
+        );
+        assert_eq!(a.list_index, 1);
+        a.sync_current(Some(x.clone()));
+        assert_eq!(
+            a.apply(Action::Next),
+            Some(Effect::Play(y.permalink.clone()))
+        );
+        a.sync_current(Some(y.clone()));
+        assert_eq!(a.apply(Action::Next), None);
+    }
+
+    #[test]
+    fn apres_un_morceau_de_la_file_la_lecture_reprend_au_curseur_pas_en_tete() {
+        let (ta, tb, tc, q) = (
+            track(Platform::SoundCloud, "A"),
+            track(Platform::SoundCloud, "B"),
+            track(Platform::SoundCloud, "C"),
+            track(Platform::Mixcloud, "Q"),
+        );
+        let mut a = App::new();
+        a.restore(
+            vec![q.clone()],
+            vec![ta.clone(), tb.clone(), tc.clone()],
+            vec![],
+        );
+        a.apply(Action::Down);
+        a.apply(Action::Activate); // B depuis l'historique
+        a.sync_current(Some(tb.clone()));
+        assert_eq!(
+            a.apply(Action::Next),
+            Some(Effect::Play(q.permalink.clone()))
+        );
+        a.sync_current(Some(q.clone()));
+        assert_eq!(a.history[0].title, "Q");
+        // « Suivant » continue après B (curseur), pas depuis le haut.
+        assert_eq!(
+            a.apply(Action::Next),
+            Some(Effect::Play(tc.permalink.clone()))
+        );
     }
 
     #[test]

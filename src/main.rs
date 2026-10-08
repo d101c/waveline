@@ -195,9 +195,14 @@ fn run(terminal: &mut Tui, app: &mut App, config: &mut Config, theme: &Theme) ->
         let fin = player.shared().finished_generation.load(Ordering::Relaxed);
         if fin != last_finished {
             last_finished = fin;
-            match app.apply(Action::Next) {
-                Some(eff) => dispatch_effect(eff, app, &mut rt),
-                None => dispatch_effect(Effect::Stop, app, &mut rt),
+            // Si l'utilisateur a déjà repris la main dans la même frame (Stop
+            // traité → plus de morceau courant ; ou nouvelle lecture en cours
+            // de chargement), l'enchaînement ne doit pas l'écraser.
+            if app.playback.current.is_some() && !app.playback.loading {
+                match app.apply(Action::Next) {
+                    Some(eff) => dispatch_effect(eff, app, &mut rt),
+                    None => dispatch_effect(Effect::Stop, app, &mut rt),
+                }
             }
         }
 
@@ -487,7 +492,12 @@ fn handle_paste(app: &mut App, text: &str) -> Option<Effect> {
         .collect();
     if matches!(app.input, Input::Normal) {
         // Hors saisie, seul un lien reconnu a un sens.
-        let first = cleaned.lines().map(str::trim).find(|l| !l.is_empty())?;
+        // Les terminaux (VTE, xterm, tmux) livrent souvent un CR seul en guise
+        // de saut de ligne : on coupe sur les deux.
+        let first = cleaned
+            .split(['\n', '\r'])
+            .map(str::trim)
+            .find(|l| !l.is_empty())?;
         providers::platform_of(first)?;
         app.begin_command();
         for c in first.chars() {
@@ -704,6 +714,15 @@ mod tests {
         assert_eq!(
             app.input,
             Input::Command("https://www.mixcloud.com/a/b/".into())
+        );
+        let mut app = App::new();
+        handle_paste(
+            &mut app,
+            "https://soundcloud.com/a/b\rhttps://soundcloud.com/c/d",
+        );
+        assert_eq!(
+            app.input,
+            Input::Command("https://soundcloud.com/a/b".into())
         );
         // En saisie : lignes et tabulations → un espace, pas de mot soudé.
         let mut app = App::new();

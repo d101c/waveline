@@ -69,13 +69,14 @@ impl Config {
         let Some(p) = Self::path() else {
             return Config::default();
         };
-        let Ok(text) = std::fs::read_to_string(&p) else {
+        let Ok(bytes) = std::fs::read(&p) else {
             return Config::default();
         };
-        match Self::parse(&text) {
+        let parsed = std::str::from_utf8(&bytes).ok().and_then(Self::parse);
+        match parsed {
             Some(c) => c,
             None => {
-                if !text.trim().is_empty() {
+                if !bytes.iter().all(u8::is_ascii_whitespace) {
                     let _ = std::fs::rename(&p, p.with_extension("json.bak"));
                 }
                 Config::default()

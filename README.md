@@ -128,8 +128,10 @@ Press `a` on any track to append it to the **Queue**; the sidebar shows how
 many tracks are waiting. When a track ends (or you press `n`), the queue is
 played first, then the list continues after the current track. Playing a
 queued track from the Queue view consumes it. Everything you play is recorded
-in **History** (most recent first, deduplicated, 200 entries), and waveline
-reopens on History so you can pick up where you left off. In either view,
+in **History** (most recent first, deduplicated, 200 entries); while you
+listen from the History view itself the list stays put, so `n` walks down to
+older entries. waveline reopens on History so you can pick up where you left
+off. In either view,
 `x` removes the selection and `X` clears the list.
 
 ### Connecting your accounts
@@ -160,6 +162,7 @@ src/
 ├── keymap.rs       the single key table: drives dispatch AND the help window
 ├── ui.rs           ratatui rendering + clickable-zone mapping + help overlay
 ├── i18n.rs         UI language (English default, French on demand)
+├── theme.rs        colour palette
 ├── model.rs        unified Track (SoundCloud ⇄ Mixcloud)
 ├── providers/      stream resolution & search (SC + MC queried in parallel)
 │   ├── soundcloud.rs   scraped client_id, /resolve, transcodings
