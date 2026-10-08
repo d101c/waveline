@@ -31,6 +31,10 @@ pub enum MediaCommand {
     Prev,
     Stop,
     SetVolume(u8),
+    /// Saut relatif (millisecondes signées).
+    Seek(i64),
+    /// Position absolue (millisecondes).
+    SetPosition(u64),
     Quit,
 }
 
@@ -146,10 +150,12 @@ impl PlayerInterface for Imp {
         self.send(MediaCommand::Play);
         Ok(())
     }
-    async fn seek(&self, _offset: Time) -> fdo::Result<()> {
+    async fn seek(&self, offset: Time) -> fdo::Result<()> {
+        self.send(MediaCommand::Seek(offset.as_millis()));
         Ok(())
     }
-    async fn set_position(&self, _track: TrackId, _pos: Time) -> fdo::Result<()> {
+    async fn set_position(&self, _track: TrackId, pos: Time) -> fdo::Result<()> {
+        self.send(MediaCommand::SetPosition(pos.as_millis().max(0) as u64));
         Ok(())
     }
     async fn open_uri(&self, _uri: String) -> fdo::Result<()> {
@@ -212,7 +218,7 @@ impl PlayerInterface for Imp {
         Ok(true)
     }
     async fn can_seek(&self) -> fdo::Result<bool> {
-        Ok(false)
+        Ok(self.shared.seekable.load(Ordering::Relaxed))
     }
     async fn can_control(&self) -> fdo::Result<bool> {
         Ok(true)
@@ -237,10 +243,12 @@ pub fn start(shared: Arc<Shared>, tx: Sender<MediaCommand>) -> JoinHandle<()> {
                 // Publie les changements d'état pour l'affichage (verrou, panneau).
                 let mut last_status: Option<PlaybackStatus> = None;
                 let mut last_id = String::new();
+                let mut last_seekable: Option<bool> = None;
                 loop {
                     async_io::Timer::after(Duration::from_millis(700)).await;
                     let status = server.imp().status();
                     let id = server.imp().current_id();
+                    let seekable = server.imp().shared.seekable.load(Ordering::Relaxed);
                     let mut props = Vec::new();
                     if Some(status) != last_status {
                         last_status = Some(status);
@@ -249,6 +257,10 @@ pub fn start(shared: Arc<Shared>, tx: Sender<MediaCommand>) -> JoinHandle<()> {
                     if id != last_id {
                         last_id = id;
                         props.push(Property::Metadata(server.imp().build_metadata()));
+                    }
+                    if Some(seekable) != last_seekable {
+                        last_seekable = Some(seekable);
+                        props.push(Property::CanSeek(seekable));
                     }
                     if !props.is_empty() {
                         let _ = server.properties_changed(props).await;

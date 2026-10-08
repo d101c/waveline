@@ -2,10 +2,14 @@
 //! avec `L` ou un clic dans la barre latérale, persisté dans la config).
 //!
 //! Les libellés propres à un type (`Section`, `Filter`, `VizMode`) restent
-//! définis dans `app.rs`, à côté de leur enum ; ce module regroupe le reste
-//! des chaînes affichées par l'UI.
+//! définis dans `app.rs`, à côté de leur enum, et les descriptions des
+//! raccourcis vivent dans `keymap.rs` ; ce module regroupe le reste des
+//! chaînes affichées par l'UI.
 
 use serde::{Deserialize, Serialize};
+
+use crate::app::Section;
+use crate::model::Platform;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Lang {
@@ -65,13 +69,6 @@ pub fn loading(lang: Lang) -> String {
     match lang {
         Lang::En => "Loading…".into(),
         Lang::Fr => "Chargement…".into(),
-    }
-}
-
-pub fn section_soon(lang: Lang, section_label: &str) -> String {
-    match lang {
-        Lang::En => format!("{section_label} — soon"),
-        Lang::Fr => format!("{section_label} — bientôt"),
     }
 }
 
@@ -171,29 +168,174 @@ pub fn playback_stopped(lang: Lang) -> String {
     }
 }
 
-pub fn help_text(lang: Lang) -> String {
+/// Titre de la fenêtre d'aide.
+pub fn help_title(lang: Lang) -> &'static str {
     match lang {
-        Lang::En => "Help: 'c' accounts · 'v' visualizer · 'L' language · ':' URL · '/' search · j/k navigate · h/l (←/→) seek ±10s · tab focus · enter/click play · space pause · n/p track · s stop · 1/2/3 filter · q quit".into(),
-        Lang::Fr => "Aide : 'c' comptes · 'v' visualiseur · 'L' langue · ':' URL · '/' rech · j/k naviguer · h/l (←/→) saut ±10s · tab focus · enter/clic jouer · space pause · n/p piste · s stop · 1/2/3 filtre · q quitter".into(),
+        Lang::En => "Help",
+        Lang::Fr => "Aide",
+    }
+}
+
+/// Rubrique souris de la fenêtre d'aide.
+pub fn help_mouse_title(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "Mouse",
+        Lang::Fr => "Souris",
+    }
+}
+
+/// Gestes souris : (geste, effet).
+pub fn help_mouse_items(lang: Lang) -> &'static [(&'static str, &'static str)] {
+    match lang {
+        Lang::En => &[
+            ("click", "play / open / tabs"),
+            ("bar", "click progress to seek"),
+            ("wheel", "scroll · on playbar: volume"),
+        ],
+        Lang::Fr => &[
+            ("clic", "jouer / ouvrir / onglets"),
+            ("barre", "cliquer pour sauter"),
+            ("molette", "défiler · sur la barre : vol"),
+        ],
+    }
+}
+
+/// Pied de la fenêtre d'aide.
+pub fn help_close(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "any key to close",
+        Lang::Fr => "une touche pour fermer",
     }
 }
 
 pub fn keys_bar(lang: Lang) -> &'static str {
     match lang {
         Lang::En => {
-            "[space] play  [h/l] seek  [n/p] track  [:] url  [/] search  [tab] focus  [1·2·3] filter  [L] lang  [?] help:q"
+            "[space] play  [h/l] seek  [n/p] track  [a] queue  [/] search  [:] url  [tab] focus  [?] help  [q] quit"
         }
         Lang::Fr => {
-            "[space] play  [h/l] saut  [n/p] piste  [:] url  [/] rech  [tab] focus  [1·2·3] filtre  [L] langue  [?] aide:q"
+            "[space] play  [h/l] saut  [n/p] piste  [a] file  [/] rech  [:] url  [tab] focus  [?] aide  [q] quitter"
         }
     }
 }
 
-pub fn empty_list_hint(lang: Lang) -> &'static str {
-    match lang {
-        Lang::En => "  (empty — paste a URL with : or start a search with /)",
-        Lang::Fr => "  (vide — colle une URL avec : ou lance une recherche avec /)",
+/// Indication affichée dans une liste vide, selon la section.
+pub fn empty_hint(lang: Lang, section: Section, has_account: bool) -> &'static str {
+    match (section, lang) {
+        (Section::Queue, Lang::En) => "  (queue is empty — press 'a' on a track to add it)",
+        (Section::Queue, Lang::Fr) => {
+            "  (file vide — appuie sur 'a' sur un morceau pour l'ajouter)"
+        }
+        (Section::History, Lang::En) => {
+            "  (nothing played yet — tracks you play will show up here)"
+        }
+        (Section::History, Lang::Fr) => {
+            "  (rien d'écouté encore — les morceaux joués apparaîtront ici)"
+        }
+        (Section::Search, Lang::En) => "  (empty — paste a URL with : or start a search with /)",
+        (Section::Search, Lang::Fr) => {
+            "  (vide — colle une URL avec : ou lance une recherche avec /)"
+        }
+        (_, Lang::En) if !has_account => "  (no account — press 'c' to enter your public handles)",
+        (_, Lang::Fr) if !has_account => {
+            "  (aucun compte — appuie sur 'c' pour entrer tes pseudos publics)"
+        }
+        (_, Lang::En) => "  (empty — press enter on the section to load it)",
+        (_, Lang::Fr) => "  (vide — appuie sur entrée sur la section pour la charger)",
     }
+}
+
+pub fn queued(lang: Lang, title: &str, n: usize) -> String {
+    match lang {
+        Lang::En => format!("Queued: {title}  ({n} in queue)"),
+        Lang::Fr => format!("Ajouté à la file : {title}  ({n} en attente)"),
+    }
+}
+
+pub fn already_queue(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Already in the queue — 'x' removes, enter plays".into(),
+        Lang::Fr => "Déjà dans la file — 'x' retire, entrée joue".into(),
+    }
+}
+
+pub fn queue_empty(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Queue is empty — press 'a' on a track to add it".into(),
+        Lang::Fr => "File vide — appuie sur 'a' sur un morceau pour l'ajouter".into(),
+    }
+}
+
+pub fn history_empty(lang: Lang) -> String {
+    match lang {
+        Lang::En => "No listening history yet".into(),
+        Lang::Fr => "Pas encore d'historique d'écoute".into(),
+    }
+}
+
+pub fn removed(lang: Lang, title: &str) -> String {
+    match lang {
+        Lang::En => format!("Removed: {title}"),
+        Lang::Fr => format!("Retiré : {title}"),
+    }
+}
+
+pub fn cleared(lang: Lang, section_name: &str) -> String {
+    match lang {
+        Lang::En => format!("{section_name} cleared"),
+        Lang::Fr => format!("{section_name} : vidé"),
+    }
+}
+
+pub fn edit_hint(lang: Lang) -> String {
+    match lang {
+        Lang::En => "'x' removes and 'X' clears — in Queue or History only".into(),
+        Lang::Fr => "'x' retire et 'X' vide — dans File ou Historique seulement".into(),
+    }
+}
+
+pub fn end_of_list(lang: Lang) -> String {
+    match lang {
+        Lang::En => "End of list".into(),
+        Lang::Fr => "Fin de la liste".into(),
+    }
+}
+
+pub fn start_of_list(lang: Lang) -> String {
+    match lang {
+        Lang::En => "Start of list".into(),
+        Lang::Fr => "Début de la liste".into(),
+    }
+}
+
+pub fn playing_from_queue(lang: Lang, title: &str) -> String {
+    match lang {
+        Lang::En => format!("▶ From queue: {title}"),
+        Lang::Fr => format!("▶ Depuis la file : {title}"),
+    }
+}
+
+pub fn restarted(lang: Lang) -> String {
+    match lang {
+        Lang::En => "⏮ Restarting track".into(),
+        Lang::Fr => "⏮ Reprise au début".into(),
+    }
+}
+
+/// Bilan d'une requête : nombre de résultats + plateformes en échec.
+pub fn fetch_summary(lang: Lang, n: usize, failures: &[(Platform, String)]) -> String {
+    let mut s = if n == 0 {
+        no_results(lang)
+    } else {
+        n_results(lang, n)
+    };
+    for (p, e) in failures {
+        match lang {
+            Lang::En => s.push_str(&format!(" · {p} failed: {e}")),
+            Lang::Fr => s.push_str(&format!(" · {p} en échec : {e}")),
+        }
+    }
+    s
 }
 
 pub fn nothing_playing(lang: Lang) -> &'static str {

@@ -10,14 +10,17 @@ mod b64;
 mod config;
 mod http;
 mod i18n;
+mod keymap;
 mod model;
 mod mpris;
 mod providers;
+mod state;
 mod theme;
 mod ui;
 
 use std::io::{self, Stdout};
 use std::sync::atomic::Ordering;
+use std::sync::mpsc::{self, Sender};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -31,15 +34,20 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use app::{Action, App, Effect, Focus, Input, SeekAccel};
+use app::{Action, App, Effect, FetchRequest, Focus, Input, Section};
 use audio::Player;
 use config::Config;
 use model::{Platform, Track};
 use mpris::MediaCommand;
+use providers::Fetched;
+use state::State;
 use theme::Theme;
 use ui::Regions;
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
+
+/// Résultat d'une requête réseau, livré à la boucle principale par un thread.
+type FetchResult = (u64, Fetched);
 
 fn main() -> io::Result<()> {
     // Modes debug hors-TUI.
@@ -103,20 +111,26 @@ fn main() -> io::Result<()> {
             }
             return Ok(());
         }
+        Some("--version" | "-V") => {
+            println!("waveline {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
         _ => {}
     }
 
-    // Préférences (comptes, langue, volume, visualiseur) avant toute chose :
-    // le moteur audio démarre directement au bon volume.
+    // Préférences (comptes, langue, volume, visualiseur) et données d'usage
+    // (file, historique) avant toute chose : le moteur audio démarre au bon
+    // volume et la première frame montre déjà où l'on en était.
     let mut config = Config::load();
+    let saved = State::load();
     let theme = Theme::dark();
     let mut app = App::new();
-    app.tracks = demo_tracks();
     app.sc_handle = config.soundcloud.clone();
     app.mc_handle = config.mixcloud.clone();
     app.playback.volume = config.volume;
     app.viz = config.viz;
     app.set_startup_lang(config.lang);
+    app.restore(saved.queue, saved.history, demo_tracks());
 
     // Si quoi que ce soit panique, le terminal est rendu à l'utilisateur
     // (mode brut coupé, écran alternatif quitté) avant l'affichage du message.
@@ -129,40 +143,47 @@ fn main() -> io::Result<()> {
     // Les préférences modifiées pendant la session (volume, visualiseur…) sont
     // écrites une fois, à la sortie, plutôt qu'à chaque appui.
     persist_config(&app, &mut config);
+    persist_state(&mut app);
     res
+}
+
+/// Tout ce dont la boucle a besoin pour exécuter un [`Effect`].
+struct Runtime<'a> {
+    player: &'a Player,
+    config: &'a mut Config,
+    /// Émetteur cloné dans chaque thread de requête réseau.
+    fetch_tx: Sender<FetchResult>,
 }
 
 fn run(terminal: &mut Tui, app: &mut App, config: &mut Config, theme: &Theme) -> io::Result<()> {
     let player = Player::new(app.playback.volume);
     let mut regions = Regions::default();
     let mut last_finished = player.shared().finished_generation.load(Ordering::Relaxed);
-    let mut search_rx: Option<std::sync::mpsc::Receiver<Vec<Track>>> = None;
-    let mut seek_accel = SeekAccel::new();
+    let (fetch_tx, fetch_rx) = mpsc::channel::<FetchResult>();
+    let mut rt = Runtime {
+        player: &player,
+        config,
+        fetch_tx,
+    };
 
     // Intégration MPRIS : touches média / contrôles bureau. No-op sans D-Bus.
-    let (media_tx, media_rx) = std::sync::mpsc::channel::<MediaCommand>();
+    let (media_tx, media_rx) = mpsc::channel::<MediaCommand>();
     let _mpris = mpris::start(player.shared().clone(), media_tx);
 
     while !app.should_quit {
+        app.tick(Instant::now());
         sync_playback(app, &player);
 
         // Commandes média externes (touches clavier, panneau, écran de verrou).
         while let Ok(cmd) = media_rx.try_recv() {
             if let Some(eff) = handle_media(app, cmd) {
-                dispatch_effect(eff, &player, app, config, &mut search_rx);
+                dispatch_effect(eff, app, &mut rt);
             }
         }
 
-        // Résultats de recherche prêts ?
-        if let Some(rx) = &search_rx {
-            match rx.try_recv() {
-                Ok(tracks) => {
-                    app.set_results(tracks);
-                    search_rx = None;
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => search_rx = None,
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
-            }
+        // Résultats réseau prêts ? (les réponses périmées sont filtrées par l'app)
+        while let Ok((id, fetched)) = fetch_rx.try_recv() {
+            app.deliver(id, fetched);
         }
 
         // Enchaînement automatique quand un morceau se termine.
@@ -170,8 +191,13 @@ fn run(terminal: &mut Tui, app: &mut App, config: &mut Config, theme: &Theme) ->
         if fin != last_finished {
             last_finished = fin;
             if let Some(eff) = app.apply(Action::Next) {
-                exec(&player, eff);
+                dispatch_effect(eff, app, &mut rt);
             }
+        }
+
+        // File/historique modifiés : on persiste (petit JSON, écriture atomique).
+        if app.take_state_dirty() {
+            persist_state(app);
         }
 
         // Ne dessine que si le terminal a une taille exploitable (évite un
@@ -182,46 +208,45 @@ fn run(terminal: &mut Tui, app: &mut App, config: &mut Config, theme: &Theme) ->
             .unwrap_or(false);
         if drawable {
             terminal.draw(|f| regions = ui::draw(f, app, theme))?;
+            app.set_viewport_rows(regions.list_inner.height);
         }
 
-        // Cadence adaptative : ~30 fps en lecture (visualiseurs fluides),
-        // ~4 fps au repos (CPU minimal).
-        let tick = if app.playback.playing { 33 } else { 250 };
+        // Cadence adaptative : ~30 fps en lecture (visualiseurs fluides) ou
+        // pendant une requête (spinner), ~4 fps au repos (CPU minimal).
+        let animated = app.playback.playing || app.pending.is_some();
+        let tick = if animated { 33 } else { 250 };
         if event::poll(Duration::from_millis(tick))? {
             let effect = match event::read()? {
-                Event::Key(key) => handle_key(app, &mut seek_accel, key),
+                Event::Key(key) => handle_key(app, key),
                 Event::Mouse(m) => handle_mouse(app, &regions, m),
                 Event::Paste(text) => handle_paste(app, &text),
                 _ => None,
             };
             if let Some(eff) = effect {
-                dispatch_effect(eff, &player, app, config, &mut search_rx);
+                dispatch_effect(eff, app, &mut rt);
             }
         }
     }
     Ok(())
 }
 
-/// Exécute un effet : audio direct, ou lancement de recherche/bibliothèque,
-/// ou sauvegarde des comptes. Partagé par le clavier, la souris et MPRIS.
-fn dispatch_effect(
-    eff: Effect,
-    player: &Player,
-    app: &App,
-    config: &mut Config,
-    search_rx: &mut Option<std::sync::mpsc::Receiver<Vec<Track>>>,
-) {
+/// Exécute un effet : audio direct, requête réseau en thread, ou sauvegarde.
+/// Partagé par le clavier, la souris et MPRIS.
+fn dispatch_effect(eff: Effect, app: &App, rt: &mut Runtime<'_>) {
     match eff {
-        Effect::Search(q) => *search_rx = Some(spawn_search(q)),
-        Effect::LoadLibrary(sec) => {
-            *search_rx = Some(spawn_library(
-                app.sc_handle.clone(),
-                app.mc_handle.clone(),
-                sec,
-            ));
-        }
-        Effect::SaveConfig => persist_config(app, config),
-        other => exec(player, other),
+        Effect::Fetch { id, request } => spawn_fetch(
+            id,
+            request,
+            app.sc_handle.clone(),
+            app.mc_handle.clone(),
+            rt.fetch_tx.clone(),
+        ),
+        Effect::SaveConfig => persist_config(app, rt.config),
+        Effect::Play(url) => rt.player.play_url(url),
+        Effect::Toggle => rt.player.toggle(),
+        Effect::Stop => rt.player.stop(),
+        Effect::SetVolume(v) => rt.player.set_volume(v),
+        Effect::Seek(delta_ms) => rt.player.seek(delta_ms),
     }
 }
 
@@ -235,26 +260,41 @@ fn persist_config(app: &App, config: &mut Config) {
     config.save();
 }
 
-/// Texte collé (bracketed paste) : en saisie, il alimente la ligne d'un bloc ;
-/// en mode normal, une URL SoundCloud/Mixcloud collée ouvre directement
-/// l'invite `:` pré-remplie — il ne reste qu'à valider.
-fn handle_paste(app: &mut App, text: &str) -> Option<Effect> {
-    let clean: String = text.chars().filter(|c| !c.is_control()).collect();
-    if clean.is_empty() {
-        return None;
+/// Écrit la file et l'historique sur disque.
+fn persist_state(app: &mut App) {
+    app.take_state_dirty();
+    State {
+        queue: app.queue.clone(),
+        history: app.history.clone(),
     }
-    if matches!(app.input, Input::Normal) {
-        // Hors saisie, seul un lien reconnu a un sens.
-        providers::platform_of(clean.trim())?;
-        app.begin_command();
-    }
-    for c in clean.chars() {
-        app.input_push(c);
-    }
-    None
+    .save();
 }
 
-/// Traduit une commande média externe (MPRIS) en effet, comme une touche.
+/// Lance une requête réseau dans un thread ; le résultat (étiqueté par `id`)
+/// revient par le canal, où la boucle le livre à l'app.
+fn spawn_fetch(
+    id: u64,
+    request: FetchRequest,
+    sc: Option<String>,
+    mc: Option<String>,
+    tx: Sender<FetchResult>,
+) {
+    std::thread::Builder::new()
+        .name("waveline-fetch".into())
+        .spawn(move || {
+            let agent = http::agent();
+            let found = match request {
+                FetchRequest::Search(q) => providers::search_all(&agent, &q, 20),
+                FetchRequest::Library(sec) => {
+                    providers::library(&agent, sc.as_deref(), mc.as_deref(), sec)
+                }
+            };
+            let _ = tx.send((id, found));
+        })
+        .expect("thread fetch");
+}
+
+/// Traduit une commande média externe (MPRIS) en action, comme une touche.
 fn handle_media(app: &mut App, cmd: MediaCommand) -> Option<Effect> {
     match cmd {
         MediaCommand::PlayPause => app.apply(Action::PlayPause),
@@ -274,54 +314,14 @@ fn handle_media(app: &mut App, cmd: MediaCommand) -> Option<Effect> {
                 None
             }
         }
-        MediaCommand::Stop => {
-            app.status = i18n::playback_stopped(app.lang);
-            Some(Effect::Stop)
-        }
+        MediaCommand::Stop => app.apply(Action::Stop),
         MediaCommand::SetVolume(v) => {
             app.playback.volume = v.min(100);
             Some(Effect::SetVolume(app.playback.volume))
         }
+        MediaCommand::Seek(delta_ms) => app.seek(delta_ms),
+        MediaCommand::SetPosition(ms) => app.seek_to(ms),
         MediaCommand::Quit => app.apply(Action::Quit),
-    }
-}
-
-/// Lance une recherche unifiée dans un thread ; le résultat arrive par le canal.
-fn spawn_search(query: String) -> std::sync::mpsc::Receiver<Vec<Track>> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let agent = http::agent();
-        let results = providers::search_all(&agent, &query, 20);
-        let _ = tx.send(results.tracks);
-    });
-    rx
-}
-
-/// Charge une section de bibliothèque dans un thread (données publiques).
-fn spawn_library(
-    sc: Option<String>,
-    mc: Option<String>,
-    section: providers::LibrarySection,
-) -> std::sync::mpsc::Receiver<Vec<Track>> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let agent = http::agent();
-        let results = providers::library(&agent, sc.as_deref(), mc.as_deref(), section);
-        let _ = tx.send(results.tracks);
-    });
-    rx
-}
-
-/// Exécute un effet sur le moteur audio.
-fn exec(player: &Player, effect: Effect) {
-    match effect {
-        Effect::Play(url) => player.play_url(url),
-        Effect::Toggle => player.toggle(),
-        Effect::Stop => player.stop(),
-        Effect::SetVolume(v) => player.set_volume(v),
-        Effect::Seek(delta_ms) => player.seek(delta_ms),
-        // Recherche / bibliothèque / sauvegarde sont gérées en amont, jamais ici.
-        Effect::Search(_) | Effect::LoadLibrary(_) | Effect::SaveConfig => {}
     }
 }
 
@@ -333,8 +333,9 @@ fn sync_playback(app: &mut App, player: &Player) {
     app.playback.playing = s.playing.load(Ordering::Relaxed);
     app.playback.loading = s.loading.load(Ordering::Relaxed);
     app.playback.seekable = s.seekable.load(Ordering::Relaxed);
-    if let Ok(now) = s.now.lock() {
-        app.playback.current = now.clone();
+    let now = s.now.lock().ok().map(|n| n.clone());
+    if let Some(now) = now {
+        app.sync_current(now);
     }
     if let Ok(spec) = s.spectrum.lock() {
         app.playback.spectrum = spec.to_vec();
@@ -349,97 +350,55 @@ fn sync_playback(app: &mut App, player: &Player) {
     }
 }
 
-fn handle_key(app: &mut App, seek: &mut SeekAccel, key: KeyEvent) -> Option<Effect> {
+fn handle_key(app: &mut App, key: KeyEvent) -> Option<Effect> {
     if key.kind != KeyEventKind::Press {
         return None;
     }
-    // En mode saisie (URL ou recherche), les touches alimentent la ligne.
+    // L'aide est modale : n'importe quelle touche la referme.
+    if app.show_help {
+        app.show_help = false;
+        return None;
+    }
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    // En mode saisie (URL, recherche, pseudos), les touches alimentent la ligne.
     if !matches!(app.input, Input::Normal) {
-        return match key.code {
-            KeyCode::Esc => {
+        return match (key.code, ctrl) {
+            (KeyCode::Esc, _) => {
                 app.input_cancel();
                 None
             }
-            KeyCode::Enter => app.input_submit(),
-            KeyCode::Backspace => {
+            (KeyCode::Enter, _) => app.input_submit(),
+            (KeyCode::Backspace, _) => {
                 app.input_pop();
                 None
             }
-            KeyCode::Char(c) => {
+            (KeyCode::Char('c'), true) => app.apply(Action::Quit),
+            (KeyCode::Char('u'), true) => {
+                app.input_clear();
+                None
+            }
+            (KeyCode::Char('w'), true) => {
+                app.input_pop_word();
+                None
+            }
+            (KeyCode::Char(c), false) => {
                 app.input_push(c);
                 None
             }
             _ => None,
         };
     }
-
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-        return app.apply(Action::Quit);
-    }
-    // Arrêt complet de la lecture.
-    if key.code == KeyCode::Char('s') {
-        app.status = i18n::playback_stopped(app.lang);
-        return Some(Effect::Stop);
-    }
-
-    // Saut dans le morceau : h/← recule, l/→ avance, avec accélération sur
-    // répétition rapide (cf. `SeekAccel`). `Tab` reste le seul changement de
-    // panneau, ce qui libère ces touches.
-    let seek_dir = match key.code {
-        KeyCode::Char('l') | KeyCode::Right => Some(1i8),
-        KeyCode::Char('h') | KeyCode::Left => Some(-1i8),
-        _ => None,
-    };
-    if let Some(dir) = seek_dir {
-        return app.seek(seek.step(Instant::now(), dir));
-    }
-
-    let action = match key.code {
-        KeyCode::Char('q') => Some(Action::Quit),
-        KeyCode::Char(' ') => Some(Action::PlayPause),
-        KeyCode::Char('j') | KeyCode::Down => Some(Action::Down),
-        KeyCode::Char('k') | KeyCode::Up => Some(Action::Up),
-        KeyCode::Char('g') => Some(Action::Top),
-        KeyCode::Char('G') => Some(Action::Bottom),
-        KeyCode::Enter => Some(Action::Activate),
-        KeyCode::Tab => Some(Action::ToggleFocus),
-        KeyCode::Char('n') => Some(Action::Next),
-        KeyCode::Char('p') => Some(Action::Prev),
-        KeyCode::Char('+') | KeyCode::Char('=') => Some(Action::VolumeUp),
-        KeyCode::Char('-') => Some(Action::VolumeDown),
-        KeyCode::Char('1') => Some(Action::FilterAll),
-        KeyCode::Char('2') => Some(Action::FilterSoundCloud),
-        KeyCode::Char('3') => Some(Action::FilterMixcloud),
-        KeyCode::Char(':') => {
-            app.begin_command();
-            None
-        }
-        KeyCode::Char('/') => {
-            app.begin_search();
-            None
-        }
-        KeyCode::Char('c') => {
-            app.begin_connect();
-            None
-        }
-        KeyCode::Char('v') => {
-            app.cycle_viz();
-            None
-        }
-        KeyCode::Char('L') => Some(Action::ToggleLang),
-        KeyCode::Char('?') => {
-            app.status = i18n::help_text(app.lang);
-            None
-        }
-        _ => None,
-    };
-    action.and_then(|a| app.apply(a))
+    keymap::action_for(&key).and_then(|a| app.apply(a))
 }
 
 fn handle_mouse(app: &mut App, regions: &Regions, m: MouseEvent) -> Option<Effect> {
     let (x, y) = (m.column, m.row);
     match m.kind {
         MouseEventKind::Down(MouseButton::Left) => {
+            if app.show_help {
+                app.show_help = false;
+                return None;
+            }
             if let Some(filter) = regions.filter_at(x, y) {
                 return match filter {
                     app::Filter::All => app.apply(Action::FilterAll),
@@ -450,13 +409,20 @@ fn handle_mouse(app: &mut App, regions: &Regions, m: MouseEvent) -> Option<Effec
             if regions.playpause_at(x, y) {
                 return app.apply(Action::PlayPause);
             }
+            if let Some(ratio) = regions.progress_ratio_at(x, y) {
+                // Clic sur la barre de progression = saut à cette position.
+                let target = (ratio * app.playback.duration_ms as f64) as u64;
+                return app.seek_to(target);
+            }
             if regions.lang_at(x, y) {
                 return app.apply(Action::ToggleLang);
             }
+            if regions.accounts_at(x, y) {
+                return app.apply(Action::BeginConnect);
+            }
             if let Some(i) = regions.section_at(x, y) {
                 app.focus = Focus::Sidebar;
-                app.section_index = i;
-                app.section = app::Section::ALL[i];
+                app.select_section(Section::ALL[i]);
                 return app.apply(Action::Activate);
             }
             if let Some(i) = regions.list_row_at(x, y) {
@@ -467,6 +433,9 @@ fn handle_mouse(app: &mut App, regions: &Regions, m: MouseEvent) -> Option<Effec
             }
             None
         }
+        // Molette sur la barre de lecture : volume. Ailleurs : défilement.
+        MouseEventKind::ScrollDown if regions.playbar_at(x, y) => app.apply(Action::VolumeDown),
+        MouseEventKind::ScrollUp if regions.playbar_at(x, y) => app.apply(Action::VolumeUp),
         MouseEventKind::ScrollDown => {
             app.focus = Focus::List;
             app.apply(Action::Down)
@@ -477,6 +446,25 @@ fn handle_mouse(app: &mut App, regions: &Regions, m: MouseEvent) -> Option<Effec
         }
         _ => None,
     }
+}
+
+/// Texte collé (bracketed paste) : en saisie, il alimente la ligne d'un bloc ;
+/// en mode normal, une URL SoundCloud/Mixcloud collée ouvre directement
+/// l'invite `:` pré-remplie — il ne reste qu'à valider.
+fn handle_paste(app: &mut App, text: &str) -> Option<Effect> {
+    let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+    if clean.is_empty() {
+        return None;
+    }
+    if matches!(app.input, Input::Normal) {
+        // Hors saisie, seul un lien reconnu a un sens.
+        providers::platform_of(clean.trim())?;
+        app.begin_command();
+    }
+    for c in clean.chars() {
+        app.input_push(c);
+    }
+    None
 }
 
 // --- Modes debug --------------------------------------------------------------
@@ -613,7 +601,7 @@ fn install_panic_hook() {
     }));
 }
 
-// --- Données de démonstration (remplacées par les providers ensuite) ----------
+// --- Données de démonstration (premier contact, sans compte) -----------------
 
 fn demo_tracks() -> Vec<Track> {
     // Vraies URLs jouables (libres de DRM) pour un premier contact concret.
