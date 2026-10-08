@@ -4,9 +4,9 @@
 //! Pipeline : client_id → `/resolve` → choix transcoding → URL signée →
 //! progressive (mp3 direct) ou HLS (segments).
 
-use std::cell::RefCell;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use serde_json::Value;
 
@@ -16,9 +16,20 @@ use crate::model::{Platform, Track};
 
 const API: &str = "https://api-v2.soundcloud.com";
 
-thread_local! {
-    /// Cache mémoire du client_id pour éviter de re-scraper à chaque appel.
-    static CLIENT_ID: RefCell<Option<String>> = const { RefCell::new(None) };
+/// Cache mémoire du client_id, partagé par tout le processus. Les recherches et
+/// chargements de bibliothèque tournent chacun dans un thread éphémère : un
+/// cache par thread serait vide à chaque fois et relirait le disque (voire
+/// re-scraperait) à chaque appel.
+static CLIENT_ID: Mutex<Option<String>> = Mutex::new(None);
+
+fn cached_client_id() -> Option<String> {
+    CLIENT_ID.lock().ok().and_then(|c| c.clone())
+}
+
+fn set_cached_client_id(id: Option<String>) {
+    if let Ok(mut c) = CLIENT_ID.lock() {
+        *c = id;
+    }
 }
 
 fn cache_path() -> Option<PathBuf> {
@@ -27,14 +38,14 @@ fn cache_path() -> Option<PathBuf> {
 
 /// Renvoie un client_id valide : mémoire → disque → scraping du site.
 pub fn client_id(agent: &ureq::Agent) -> Result<String, ProviderError> {
-    if let Some(id) = CLIENT_ID.with(|c| c.borrow().clone()) {
+    if let Some(id) = cached_client_id() {
         return Ok(id);
     }
     if let Some(p) = cache_path() {
         if let Ok(s) = fs::read_to_string(&p) {
             let s = s.trim().to_string();
             if s.len() >= 16 {
-                CLIENT_ID.with(|c| *c.borrow_mut() = Some(s.clone()));
+                set_cached_client_id(Some(s.clone()));
                 return Ok(s);
             }
         }
@@ -46,14 +57,14 @@ pub fn client_id(agent: &ureq::Agent) -> Result<String, ProviderError> {
 
 /// Invalide le client_id en cache (à appeler sur 401/403) pour forcer un re-scrap.
 pub fn invalidate_client_id() {
-    CLIENT_ID.with(|c| *c.borrow_mut() = None);
+    set_cached_client_id(None);
     if let Some(p) = cache_path() {
         let _ = fs::remove_file(p);
     }
 }
 
 fn store_client_id(id: &str) {
-    CLIENT_ID.with(|c| *c.borrow_mut() = Some(id.to_string()));
+    set_cached_client_id(Some(id.to_string()));
     if let Some(p) = cache_path() {
         if let Some(parent) = p.parent() {
             let _ = fs::create_dir_all(parent);

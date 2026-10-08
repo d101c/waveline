@@ -249,7 +249,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut Regi
                 .playback
                 .current
                 .as_ref()
-                .map(|c| c.id == t.id && c.platform == t.platform)
+                .map(|c| c.same_as(t))
                 .unwrap_or(false);
             let marker = if is_current {
                 if app.playback.playing {

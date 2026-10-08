@@ -55,7 +55,8 @@ fn main() -> io::Result<()> {
         Some("search") => {
             let q = args[2..].join(" ");
             let agent = http::agent();
-            for t in providers::search_all(&agent, &q, 8) {
+            let found = providers::search_all(&agent, &q, 8);
+            for t in &found.tracks {
                 println!(
                     "[{}] {} — {} ({})",
                     t.platform.tag(),
@@ -63,6 +64,9 @@ fn main() -> io::Result<()> {
                     t.title,
                     t.duration_human()
                 );
+            }
+            for (p, e) in &found.failures {
+                eprintln!("warning: {p}: {e}");
             }
             return Ok(());
         }
@@ -83,9 +87,9 @@ fn main() -> io::Result<()> {
                 .filter(|s| s.as_str() != "-")
                 .map(|s| s.as_str());
             let agent = http::agent();
-            let tracks = providers::library(&agent, sc, mc, sec);
-            println!("{} tracks", tracks.len());
-            for t in tracks.iter().take(20) {
+            let found = providers::library(&agent, sc, mc, sec);
+            println!("{} tracks", found.tracks.len());
+            for t in found.tracks.iter().take(20) {
                 println!(
                     "[{}] {} — {} ({})",
                     t.platform.tag(),
@@ -93,6 +97,9 @@ fn main() -> io::Result<()> {
                     t.title,
                     t.duration_human()
                 );
+            }
+            for (p, e) in &found.failures {
+                eprintln!("warning: {p}: {e}");
             }
             return Ok(());
         }
@@ -251,7 +258,7 @@ fn spawn_search(query: String) -> std::sync::mpsc::Receiver<Vec<Track>> {
     std::thread::spawn(move || {
         let agent = http::agent();
         let results = providers::search_all(&agent, &query, 20);
-        let _ = tx.send(results);
+        let _ = tx.send(results.tracks);
     });
     rx
 }
@@ -266,7 +273,7 @@ fn spawn_library(
     std::thread::spawn(move || {
         let agent = http::agent();
         let results = providers::library(&agent, sc.as_deref(), mc.as_deref(), section);
-        let _ = tx.send(results);
+        let _ = tx.send(results.tracks);
     });
     rx
 }

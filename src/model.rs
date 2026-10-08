@@ -6,8 +6,10 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 /// Plateforme d'origine d'un morceau.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Platform {
     SoundCloud,
     Mixcloud,
@@ -33,7 +35,10 @@ impl fmt::Display for Platform {
 }
 
 /// Un morceau / mix unifié, indépendant de la plateforme.
-#[derive(Debug, Clone)]
+///
+/// Sérialisable pour la persistance de la file et de l'historique
+/// (`~/.local/share/waveline/state.json`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Track {
     pub platform: Platform,
     /// Identifiant stable côté plateforme (urn SoundCloud, key Mixcloud).
@@ -47,6 +52,12 @@ pub struct Track {
 }
 
 impl Track {
+    /// Deux entrées désignent le même morceau si plateforme et identifiant
+    /// coïncident (le titre ou la durée peuvent varier entre deux réponses API).
+    pub fn same_as(&self, other: &Track) -> bool {
+        self.platform == other.platform && self.id == other.id
+    }
+
     /// Durée formatée `H:MM:SS` ou `M:SS`, ou `--:--` si inconnue.
     pub fn duration_human(&self) -> String {
         match self.duration_ms {
