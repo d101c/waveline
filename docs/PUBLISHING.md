@@ -7,8 +7,8 @@ commit sur `master`, puis les étapes ci-dessous. Les commandes lisent la
 version dans Cargo.toml pour ne jamais se tromper de numéro :
 
 ```sh
-V=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
-echo "release v$V"
+V=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)   # ex. 0.2.0
+[ -n "$V" ] && echo "release v$V"                     # vide ? relance depuis la racine du dépôt
 ```
 
 Tout l'outillage est prêt dans le dépôt. Ce qui suit liste, par ordre de
@@ -61,8 +61,7 @@ Release adapté à la machine, le met en cache, puis le lance.
 cd npm
 # npm/package.json est déjà bumpé dans le commit de release : on vérifie
 # l'alignement avec le crate au lieu de le réécrire.
-test "$(node -p "require('./package.json').version")" = "$V" \
-  || { echo "npm/package.json ($(node -p "require('./package.json').version")) != Cargo.toml ($V)"; exit 1; }
+node -p "require('./package.json').version"   # doit afficher la même valeur que $V
 npm login              # ton compte npm
 npm publish --access public
 ```

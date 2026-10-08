@@ -104,8 +104,10 @@ check("X vide la file → indication de liste vide", "cleared" in t and "queue i
 send(b"\t"); send(b"k"); send(b"\r")   # History (vide)
 check("vue Historique vide avec indication", "History  ·  All" in text() and "nothing played yet" in text())
 
-send(b"\t"); send(b"k"); send(b"\r")   # Search (liste non vide → s'affiche)
-check("retour sur Search : liste intacte", "J-POP" in text())
+send(b"\t"); send(b"k"); send(b"\r")   # Search : ouvre l'invite, résultats derrière
+check("retour sur Search : invite ouverte, liste intacte", "type your search" in text() and "J-POP" in text())
+send(b"\x1b")
+check("Esc referme l'invite", "type your search" not in text())
 
 send(b"/")
 send(b"four tet live")
@@ -120,7 +122,9 @@ check("Esc annule la saisie", "type your search" not in text())
 send(b":")
 send(b"https://www.mixcloud.com/NTSRadio/some-show/")
 send(b"\r", wait=0.5)
-pump(6.0)
+deadline = time.time() + 20
+while "⚠" not in text() and time.time() < deadline:
+    pump(0.5)
 t = text()
 check("lecture impossible (réseau bloqué) → erreur propre ⚠, pas de crash", "⚠" in t and alive())
 

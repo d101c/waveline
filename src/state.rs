@@ -28,17 +28,48 @@ impl State {
         dirs::data_dir().map(|d| d.join("waveline").join("state.json"))
     }
 
-    /// Charge l'état, ou un état vide en cas d'absence/erreur.
+    /// Charge l'état, ou un état vide en cas d'absence. Un fichier présent
+    /// mais illisible est mis de côté en `state.json.bak` au lieu d'être
+    /// écrasé à la prochaine sauvegarde.
     pub fn load() -> State {
-        Self::path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|s| Self::parse(&s))
-            .unwrap_or_default()
+        let Some(p) = Self::path() else {
+            return State::default();
+        };
+        let Ok(bytes) = std::fs::read(&p) else {
+            return State::default();
+        };
+        let parsed = std::str::from_utf8(&bytes).ok().and_then(Self::parse);
+        match parsed {
+            Some(s) => s,
+            None => {
+                if !bytes.is_empty() {
+                    let _ = std::fs::rename(&p, p.with_extension("json.bak"));
+                }
+                State::default()
+            }
+        }
     }
 
-    /// Analyse un état JSON ; les champs absents sont vides.
+    /// Analyse un état JSON entrée par entrée : une entrée invalide est
+    /// ignorée sans jeter le reste de la file ou de l'historique. `None` si
+    /// le texte n'est pas un objet JSON.
     pub fn parse(json: &str) -> Option<State> {
-        serde_json::from_str(json).ok()
+        let v: serde_json::Value = serde_json::from_str(json).ok()?;
+        let obj = v.as_object()?;
+        let list = |k: &str| -> Vec<Track> {
+            obj.get(k)
+                .and_then(|x| x.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|t| serde_json::from_value(t.clone()).ok())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        Some(State {
+            queue: list("queue"),
+            history: list("history"),
+        })
     }
 
     /// Écrit l'état sur disque (atomiquement). Les erreurs sont ignorées :
@@ -97,6 +128,15 @@ mod tests {
         let s = State::parse("{}").unwrap();
         assert!(s.queue.is_empty() && s.history.is_empty());
         assert_eq!(State::parse("not json"), None);
+        // Une entrée invalide n'emporte pas les autres.
+        let json = format!(
+            r#"{{"queue":[{{"bogus":1}},{}],"history":[42]}}"#,
+            serde_json::to_string(&track("ok")).unwrap()
+        );
+        let s = State::parse(&json).unwrap();
+        assert_eq!(s.queue.len(), 1);
+        assert_eq!(s.queue[0].title, "ok");
+        assert!(s.history.is_empty());
     }
 
     #[test]
