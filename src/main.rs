@@ -21,8 +21,8 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -106,29 +106,38 @@ fn main() -> io::Result<()> {
         _ => {}
     }
 
-    let mut terminal = setup_terminal()?;
+    // Préférences (comptes, langue, volume, visualiseur) avant toute chose :
+    // le moteur audio démarre directement au bon volume.
+    let mut config = Config::load();
     let theme = Theme::dark();
     let mut app = App::new();
     app.tracks = demo_tracks();
+    app.sc_handle = config.soundcloud.clone();
+    app.mc_handle = config.mixcloud.clone();
+    app.playback.volume = config.volume;
+    app.viz = config.viz;
+    app.set_startup_lang(config.lang);
 
-    let res = run(&mut terminal, &mut app, &theme);
+    // Si quoi que ce soit panique, le terminal est rendu à l'utilisateur
+    // (mode brut coupé, écran alternatif quitté) avant l'affichage du message.
+    install_panic_hook();
+    let mut terminal = setup_terminal()?;
+
+    let res = run(&mut terminal, &mut app, &mut config, &theme);
 
     restore_terminal(&mut terminal)?;
+    // Les préférences modifiées pendant la session (volume, visualiseur…) sont
+    // écrites une fois, à la sortie, plutôt qu'à chaque appui.
+    persist_config(&app, &mut config);
     res
 }
 
-fn run(terminal: &mut Tui, app: &mut App, theme: &Theme) -> io::Result<()> {
+fn run(terminal: &mut Tui, app: &mut App, config: &mut Config, theme: &Theme) -> io::Result<()> {
     let player = Player::new(app.playback.volume);
     let mut regions = Regions::default();
     let mut last_finished = player.shared().finished_generation.load(Ordering::Relaxed);
     let mut search_rx: Option<std::sync::mpsc::Receiver<Vec<Track>>> = None;
     let mut seek_accel = SeekAccel::new();
-
-    // Comptes connectés (pseudos publics) et langue chargés depuis la config.
-    let mut config = Config::load();
-    app.sc_handle = config.soundcloud.clone();
-    app.mc_handle = config.mixcloud.clone();
-    app.set_startup_lang(config.lang);
 
     // Intégration MPRIS : touches média / contrôles bureau. No-op sans D-Bus.
     let (media_tx, media_rx) = std::sync::mpsc::channel::<MediaCommand>();
@@ -140,7 +149,7 @@ fn run(terminal: &mut Tui, app: &mut App, theme: &Theme) -> io::Result<()> {
         // Commandes média externes (touches clavier, panneau, écran de verrou).
         while let Ok(cmd) = media_rx.try_recv() {
             if let Some(eff) = handle_media(app, cmd) {
-                dispatch_effect(eff, &player, app, &mut config, &mut search_rx);
+                dispatch_effect(eff, &player, app, config, &mut search_rx);
             }
         }
 
@@ -182,10 +191,11 @@ fn run(terminal: &mut Tui, app: &mut App, theme: &Theme) -> io::Result<()> {
             let effect = match event::read()? {
                 Event::Key(key) => handle_key(app, &mut seek_accel, key),
                 Event::Mouse(m) => handle_mouse(app, &regions, m),
+                Event::Paste(text) => handle_paste(app, &text),
                 _ => None,
             };
             if let Some(eff) = effect {
-                dispatch_effect(eff, &player, app, &mut config, &mut search_rx);
+                dispatch_effect(eff, &player, app, config, &mut search_rx);
             }
         }
     }
@@ -210,14 +220,38 @@ fn dispatch_effect(
                 sec,
             ));
         }
-        Effect::SaveConfig => {
-            config.soundcloud = app.sc_handle.clone();
-            config.mixcloud = app.mc_handle.clone();
-            config.lang = app.lang;
-            config.save();
-        }
+        Effect::SaveConfig => persist_config(app, config),
         other => exec(player, other),
     }
+}
+
+/// Recopie les préférences courantes de l'app dans la config et l'écrit.
+fn persist_config(app: &App, config: &mut Config) {
+    config.soundcloud = app.sc_handle.clone();
+    config.mixcloud = app.mc_handle.clone();
+    config.lang = app.lang;
+    config.volume = app.playback.volume;
+    config.viz = app.viz;
+    config.save();
+}
+
+/// Texte collé (bracketed paste) : en saisie, il alimente la ligne d'un bloc ;
+/// en mode normal, une URL SoundCloud/Mixcloud collée ouvre directement
+/// l'invite `:` pré-remplie — il ne reste qu'à valider.
+fn handle_paste(app: &mut App, text: &str) -> Option<Effect> {
+    let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+    if clean.is_empty() {
+        return None;
+    }
+    if matches!(app.input, Input::Normal) {
+        // Hors saisie, seul un lien reconnu a un sens.
+        providers::platform_of(clean.trim())?;
+        app.begin_command();
+    }
+    for c in clean.chars() {
+        app.input_push(c);
+    }
+    None
 }
 
 /// Traduit une commande média externe (MPRIS) en effet, comme une touche.
@@ -539,21 +573,44 @@ fn truncate(s: &str, n: usize) -> String {
 fn setup_terminal() -> io::Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let mut term = Terminal::new(CrosstermBackend::new(stdout))?;
     term.hide_cursor()?;
     Ok(term)
 }
 
-fn restore_terminal(terminal: &mut Tui) -> io::Result<()> {
+/// Rend le terminal à l'utilisateur. Idempotent et sans état : appelable
+/// depuis le hook de panique comme depuis la sortie normale.
+fn reset_terminal_modes() -> io::Result<()> {
     disable_raw_mode()?;
     execute!(
-        terminal.backend_mut(),
+        io::stdout(),
+        DisableBracketedPaste,
+        DisableMouseCapture,
         LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-    Ok(())
+        crossterm::cursor::Show
+    )
+}
+
+fn restore_terminal(terminal: &mut Tui) -> io::Result<()> {
+    reset_terminal_modes()?;
+    terminal.show_cursor()
+}
+
+/// Installe un hook de panique qui restaure le terminal avant d'afficher le
+/// message : sans lui, un panic laisserait le shell en mode brut, sans écho
+/// clavier et avec la capture souris active.
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = reset_terminal_modes();
+        default_hook(info);
+    }));
 }
 
 // --- Données de démonstration (remplacées par les providers ensuite) ----------

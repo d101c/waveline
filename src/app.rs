@@ -7,6 +7,8 @@
 
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
 use crate::i18n::{self, Lang};
 use crate::model::{Platform, Track};
 
@@ -170,10 +172,11 @@ impl SeekAccel {
     }
 }
 
-/// Style d'analyseur visuel (cyclé avec `v`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Style d'analyseur visuel (cyclé avec `v`), mémorisé dans la config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum VizMode {
     /// Barres de spectre ancrées en bas.
+    #[default]
     Bars,
     /// Spectre symétrique autour d'une ligne centrale (« waveline »).
     Mirror,
