@@ -538,13 +538,15 @@ impl App {
 
     // --- Dispatch ---------------------------------------------------------------
 
+    /// Referme l'aide si elle est ouverte ; renvoie vrai si c'était le cas.
+    /// L'aide est modale pour le clavier et la souris (la touche ou le clic
+    /// qui la ferme est consommé), mais pas pour les commandes média externes.
+    pub fn dismiss_help(&mut self) -> bool {
+        std::mem::take(&mut self.show_help)
+    }
+
     /// Applique une intention et renvoie l'effet éventuel.
     pub fn apply(&mut self, action: Action) -> Option<Effect> {
-        // L'aide est modale : n'importe quelle intention la referme.
-        if self.show_help {
-            self.show_help = false;
-            return None;
-        }
         match action {
             Action::Quit => {
                 self.should_quit = true;
@@ -1417,16 +1419,18 @@ mod tests {
     }
 
     #[test]
-    fn l_aide_est_modale() {
+    fn l_aide_se_referme_par_dismiss_sans_bloquer_les_commandes_media() {
         let mut a = app_with_mix();
+        assert!(!a.dismiss_help(), "rien à fermer");
         a.apply(Action::ToggleHelp);
         assert!(a.show_help);
-        // La première intention referme l'aide sans agir.
-        assert_eq!(a.apply(Action::Quit), None);
+        // Une commande externe (MPRIS) agit même aide ouverte.
+        assert_eq!(a.apply(Action::VolumeUp), Some(Effect::SetVolume(85)));
+        assert!(a.show_help);
+        // Le clavier/la souris passent par dismiss_help : la touche est consommée.
+        assert!(a.dismiss_help());
         assert!(!a.show_help);
-        assert!(!a.should_quit);
-        assert_eq!(a.apply(Action::Quit), None);
-        assert!(a.should_quit);
+        assert!(!a.dismiss_help());
     }
 
     #[test]

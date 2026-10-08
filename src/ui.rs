@@ -906,6 +906,23 @@ mod tests {
     }
 
     #[test]
+    fn l_aide_ne_panique_pas_a_la_taille_minimale_dessinable() {
+        use crate::app::{Action, App};
+        use crate::theme::Theme;
+        let mut app = App::new();
+        app.apply(Action::ToggleHelp);
+        let theme = Theme::dark();
+        for (w, h) in [(24, 14), (30, 15), (79, 20), (80, 24), (200, 60)] {
+            let backend = ratatui::backend::TestBackend::new(w, h);
+            let mut term = ratatui::Terminal::new(backend).unwrap();
+            term.draw(|f| {
+                super::draw(f, &app, &theme);
+            })
+            .unwrap();
+        }
+    }
+
+    #[test]
     fn le_spinner_tourne_avec_le_temps() {
         assert_eq!(spinner_frame(0), SPINNER[0]);
         assert_eq!(spinner_frame(80), SPINNER[1]);

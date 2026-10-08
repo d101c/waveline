@@ -143,7 +143,9 @@ fn main() -> io::Result<()> {
     // Les préférences modifiées pendant la session (volume, visualiseur…) sont
     // écrites une fois, à la sortie, plutôt qu'à chaque appui.
     persist_config(&app, &mut config);
-    persist_state(&mut app);
+    if app.take_state_dirty() {
+        persist_state(&app);
+    }
     res
 }
 
@@ -261,8 +263,7 @@ fn persist_config(app: &App, config: &mut Config) {
 }
 
 /// Écrit la file et l'historique sur disque.
-fn persist_state(app: &mut App) {
-    app.take_state_dirty();
+fn persist_state(app: &App) {
     State {
         queue: app.queue.clone(),
         history: app.history.clone(),
@@ -355,8 +356,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<Effect> {
         return None;
     }
     // L'aide est modale : n'importe quelle touche la referme.
-    if app.show_help {
-        app.show_help = false;
+    if app.dismiss_help() {
         return None;
     }
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -395,8 +395,7 @@ fn handle_mouse(app: &mut App, regions: &Regions, m: MouseEvent) -> Option<Effec
     let (x, y) = (m.column, m.row);
     match m.kind {
         MouseEventKind::Down(MouseButton::Left) => {
-            if app.show_help {
-                app.show_help = false;
+            if app.dismiss_help() {
                 return None;
             }
             if let Some(filter) = regions.filter_at(x, y) {
