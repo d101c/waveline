@@ -246,7 +246,10 @@ fn track_from_cc(cc: &Value, user: &str, slug: &str) -> Track {
         .map(|s| s * 1000);
     Track {
         platform: Platform::Mixcloud,
-        id: format!("{user}/{slug}"),
+        // Même forme que la `key` de l'API REST (`/user/slug/`, cf.
+        // `track_from_rest`) : `Track::same_as` doit reconnaître un morceau de
+        // liste dans celui que le moteur a résolu.
+        id: format!("/{user}/{slug}/"),
         title,
         artist,
         permalink: format!("https://www.mixcloud.com/{user}/{slug}/"),
@@ -364,6 +367,22 @@ mod tests {
         assert_eq!(graphql_escape(r#"a"b"#), r#"a\"b"#);
         assert_eq!(graphql_escape(r"a\b"), r"a\\b");
         assert_eq!(graphql_escape("a\nb"), r"a\nb");
+    }
+
+    #[test]
+    fn un_morceau_de_liste_est_reconnu_une_fois_resolu() {
+        // Liste (API REST) → permalink → résolution (GraphQL) : même identité.
+        let rest = track_from_rest(&serde_json::json!({
+            "key": "/NTSRadio/the-mix/",
+            "name": "The Mix",
+            "user": {"name": "NTS"},
+            "audio_length": 60
+        }))
+        .unwrap();
+        let (user, slug) = parse_url(&rest.permalink).unwrap();
+        let cc = track_from_cc(&serde_json::json!({"name": "The Mix"}), &user, &slug);
+        assert_eq!(rest.id, cc.id);
+        assert!(rest.same_as(&cc));
     }
 
     #[test]

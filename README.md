@@ -83,7 +83,8 @@ listen to both in one place, with the mouse **or** the keyboard.
   (`ureq`+rustls), no `tokio`, no system OpenSSL, no `yt-dlp`.
 - **Remembers you** — language, volume, visualizer style and accounts are
   kept in `~/.config/waveline/config.json`; queue and history in
-  `~/.local/share/waveline/state.json` (written atomically).
+  `~/.local/share/waveline/state.json`. Both files are written atomically,
+  and a hand-edited config is read field by field.
 - **English by default, French on demand** — switch language with `L` or a
   click in the sidebar.
 
@@ -118,7 +119,8 @@ Launch `waveline`, then press `?` at any time for the full key reference.
 
 Mouse: click a track or a section, click the filter tabs, click the progress
 bar to seek, scroll over the playbar to change the volume. Pasting a
-SoundCloud/Mixcloud link anywhere opens the `:` prompt pre-filled.
+SoundCloud/Mixcloud link in normal mode (no prompt open) opens the `:`
+prompt pre-filled; while a prompt is open, pasted text is inserted into it.
 
 ### Queue and history
 
@@ -183,6 +185,19 @@ response can never overwrite newer results. The engine runs in a thread and
 publishes its state (position, duration, playing/paused) that the UI reads
 back each frame. A panic hook restores the terminal before any error is
 printed. This split makes all navigation testable without a terminal.
+
+## Development
+
+```sh
+cargo test                                   # unit + rendering tests (TestBackend)
+cargo clippy --all-targets -- -D warnings    # what CI runs
+cargo build --release
+python3 scripts/smoke_tui.py target/release/waveline   # end-to-end TUI test (needs `pip install pyte`)
+```
+
+The smoke test drives the real binary in a pseudo-terminal with temporary
+config/state directories, checks the rendered screen, the clean exit and the
+persisted files, then relaunches to verify queue and history are restored.
 
 ## Known limitations
 

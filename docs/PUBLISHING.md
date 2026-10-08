@@ -1,7 +1,15 @@
 # Publier waveline — guide & recommandations
 
-Le nom **`waveline` est libre** sur crates.io et npm (vérifié) : on peut publier
-sous le nom nu des deux côtés (`cargo install waveline`, `npx waveline`).
+waveline est publié sous le nom nu `waveline` sur crates.io et npm
+(`cargo install waveline`, `npx waveline`). Chaque release = **bump de version**
+(Cargo.toml, Cargo.lock, npm/package.json, packaging/aur/PKGBUILD) dans un
+commit sur `master`, puis les étapes ci-dessous. Les commandes lisent la
+version dans Cargo.toml pour ne jamais se tromper de numéro :
+
+```sh
+V=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+echo "release v$V"
+```
 
 Tout l'outillage est prêt dans le dépôt. Ce qui suit liste, par ordre de
 priorité, **où publier** et **la commande exacte** à lancer. Les étapes
@@ -19,15 +27,15 @@ Tout le reste (npx, binstall, AUR) tire les binaires d'une Release GitHub.
 
 ```sh
 # depuis la racine du dépôt, sur master à jour
-git tag v0.1.0
-git push origin v0.1.0
+git tag "v$V"
+git push origin "v$V"
 ```
 
 → Le workflow `.github/workflows/release.yml` compile les binaires Linux
-statiques (musl, x86_64 + aarch64) et les attache à la Release `v0.1.0`
+statiques (musl, x86_64 + aarch64) et les attache à la Release `v$V`
 (archives `waveline-<target>.tar.gz` + sommes SHA-256). Rien d'autre à faire.
 
-Vérifie ensuite : `gh release view v0.1.0` doit lister 2 archives + checksums.
+Vérifie ensuite : `gh release view "v$V"` doit lister 2 archives + checksums.
 
 ---
 
@@ -51,8 +59,10 @@ Release adapté à la machine, le met en cache, puis le lance.
 
 ```sh
 cd npm
-# garde la version alignée sur celle du crate
-npm version 0.1.0 --no-git-tag-version --allow-same-version
+# npm/package.json est déjà bumpé dans le commit de release : on vérifie
+# l'alignement avec le crate au lieu de le réécrire.
+test "$(node -p "require('./package.json').version")" = "$V" \
+  || { echo "npm/package.json ($(node -p "require('./package.json').version")) != Cargo.toml ($V)"; exit 1; }
 npm login              # ton compte npm
 npm publish --access public
 ```
@@ -71,11 +81,11 @@ makepkg --printsrcinfo > .SRCINFO
 # pousse sur ssh://aur@aur.archlinux.org/waveline-bin.git (compte AUR + clé SSH)
 ```
 
-## 4. Homebrew (optionnel, Linux) 🔑
+## 4. Homebrew (Linux) 🔑
 
-Crée un tap `d101c/homebrew-tap` avec une formule pointant vers l'archive
-x86_64. `brew install d101c/tap/waveline`. À faire seulement si tu veux couvrir
-les utilisateurs Linuxbrew.
+Le tap `d101c/homebrew-tap` existe (`brew install d101c/tap/waveline`, cf.
+README). À chaque release, mettre à jour la formule : URL de l'archive
+`v$V` x86_64 (et aarch64 si fournie) + `sha256` publiés avec la Release.
 
 ---
 

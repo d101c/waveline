@@ -9,7 +9,7 @@ homepage = "https://github.com/d101c/waveline"
 readme = "README.md"
 keywords = ["tui", "soundcloud", "mixcloud", "music", "player"]
 categories = ["multimedia::audio", "command-line-utilities"]
-exclude = ["npm/", "assets/", "docs/", ".github/"]
+exclude = ["npm/", "assets/", "docs/", "scripts/", ".github/"]
 
 [[bin]]
 name = "waveline"

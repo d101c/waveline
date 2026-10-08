@@ -20,6 +20,7 @@ use mpris_server::{
 };
 
 use crate::audio::Shared;
+use crate::model::Track;
 
 /// Commande issue d'un contrôle média externe (touche, panneau, client MPRIS).
 #[derive(Debug, Clone, Copy)]
@@ -76,13 +77,45 @@ impl Imp {
         let now = self.shared.now.lock().ok().and_then(|n| n.clone());
         let mut b = Metadata::builder();
         if let Some(t) = now {
-            b = b.title(t.title.clone()).artist([t.artist.clone()]);
+            // `mpris:trackid` est obligatoire dans la spec : les clients
+            // (playerctl, Plasma) le relisent pour appeler SetPosition.
+            b = b
+                .trackid(track_path(&t))
+                .title(t.title.clone())
+                .artist([t.artist.clone()]);
             if let Some(ms) = t.duration_ms {
                 b = b.length(Time::from_millis(ms as i64));
             }
         }
         b.build()
     }
+
+    /// TrackId du morceau en cours, s'il y en a un.
+    fn current_track_path(&self) -> Option<TrackId> {
+        self.shared
+            .now
+            .lock()
+            .ok()
+            .and_then(|n| n.as_ref().map(track_path))
+    }
+}
+
+/// Chemin d'objet D-Bus stable et lisible dérivé de (plateforme, identifiant) :
+/// tout caractère hors `[A-Za-z0-9_]` devient `_`, ce qui garantit un chemin
+/// valide. Débogable avec `playerctl metadata`.
+fn track_path(t: &Track) -> TrackId {
+    let mut s = format!(
+        "/org/mpris/MediaPlayer2/waveline/track/{}_",
+        t.platform.tag()
+    );
+    s.extend(t.id.chars().map(|c| {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            c
+        } else {
+            '_'
+        }
+    }));
+    TrackId::try_from(s).unwrap_or(TrackId::NO_TRACK)
 }
 
 impl RootInterface for Imp {
@@ -154,8 +187,11 @@ impl PlayerInterface for Imp {
         self.send(MediaCommand::Seek(offset.as_millis()));
         Ok(())
     }
-    async fn set_position(&self, _track: TrackId, pos: Time) -> fdo::Result<()> {
-        self.send(MediaCommand::SetPosition(pos.as_millis().max(0) as u64));
+    async fn set_position(&self, track: TrackId, pos: Time) -> fdo::Result<()> {
+        // Spec MPRIS : un TrackId différent du morceau courant = appel périmé, ignoré.
+        if self.current_track_path().as_ref() == Some(&track) {
+            self.send(MediaCommand::SetPosition(pos.as_millis().max(0) as u64));
+        }
         Ok(())
     }
     async fn open_uri(&self, _uri: String) -> fdo::Result<()> {
@@ -269,4 +305,33 @@ pub fn start(shared: Arc<Shared>, tx: Sender<MediaCommand>) -> JoinHandle<()> {
             });
         })
         .expect("thread mpris")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Platform;
+
+    #[test]
+    fn le_chemin_de_piste_est_un_object_path_valide_et_stable() {
+        let t = Track {
+            platform: Platform::Mixcloud,
+            id: "/NTSRadio/the-mix/".into(),
+            title: "t".into(),
+            artist: "a".into(),
+            permalink: "https://www.mixcloud.com/NTSRadio/the-mix/".into(),
+            duration_ms: None,
+        };
+        let a = track_path(&t);
+        assert_ne!(a, TrackId::NO_TRACK);
+        assert_eq!(
+            a.as_str(),
+            "/org/mpris/MediaPlayer2/waveline/track/MC__NTSRadio_the_mix_"
+        );
+        assert_eq!(track_path(&t), a, "stable");
+        // Un identifiant exotique reste un chemin valide.
+        let mut odd = t.clone();
+        odd.id = "soundcloud:tracks:123 é/é".into();
+        assert_ne!(track_path(&odd), TrackId::NO_TRACK);
+    }
 }

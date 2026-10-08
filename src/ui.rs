@@ -211,9 +211,13 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, theme: &Theme, reg: &mut R
         reg.sidebar_rows.push(row);
     }
 
-    // Comptes connectés + langue, en bas de la sidebar.
-    if inner.height >= 5 {
-        let base = inner.y + inner.height - 4;
+    // Comptes connectés + langue, en bas de la sidebar — jamais par-dessus les
+    // sections : sur un terminal bas, le pied commence sous la dernière
+    // section et seules les lignes qui tiennent sont dessinées (`c` et `L`
+    // restent disponibles au clavier).
+    {
+        let sections_end = inner.y + (Section::ALL.len() as u16).min(inner.height);
+        let base = sections_end.max(inner.y + inner.height.saturating_sub(4));
         let sc = app.sc_handle.as_deref().unwrap_or("—");
         let mc = app.mc_handle.as_deref().unwrap_or("—");
         let lines = [
@@ -593,7 +597,7 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let keys = i18n::keys_bar(app.lang);
     let mut spans = Vec::with_capacity(3);
     // Requête réseau en cours : un spinner animé devant le statut.
-    if let Some(p) = app.pending {
+    if let Some(p) = app.latest_pending() {
         let elapsed = app.now().saturating_duration_since(p.started);
         spans.push(Span::styled(
             format!(" {}", spinner_frame(elapsed.as_millis() as u64)),
@@ -671,8 +675,12 @@ fn draw_help(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     right.push(Line::default());
     right.extend(group(Group::App));
 
-    let two_cols = area.width >= 80;
-    let (columns, content_h): (Vec<Vec<Line>>, u16) = if two_cols {
+    // Deux colonnes dès 80 colonnes (descriptions entières), ou dès que la
+    // colonne unique ne tiendrait pas en hauteur : mieux vaut tronquer une
+    // description que cacher des rubriques entières.
+    let single_h = left.len() + right.len() + 1;
+    let two_cols = area.width >= 80 || single_h + 2 > usize::from(area.height.saturating_sub(1));
+    let (mut columns, content_h): (Vec<Vec<Line>>, u16) = if two_cols {
         let h = left.len().max(right.len()) as u16;
         (vec![left, right], h)
     } else {
@@ -711,6 +719,19 @@ fn draw_help(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let inner = block.inner(popup);
     f.render_widget(Clear, popup);
     f.render_widget(block, popup);
+
+    // Ce qui ne tient pas est signalé sur la dernière ligne visible plutôt que
+    // coupé en silence.
+    let rows = usize::from(inner.height);
+    for col in columns.iter_mut() {
+        if col.len() > rows && rows > 0 {
+            col.truncate(rows - 1);
+            col.push(Line::from(Span::styled(
+                i18n::help_more(lang),
+                Style::default().fg(theme.dim),
+            )));
+        }
+    }
 
     let n = columns.len() as u32;
     let cols = Layout::default()
@@ -919,6 +940,93 @@ mod tests {
                 super::draw(f, &app, &theme);
             })
             .unwrap();
+        }
+    }
+
+    /// Rend l'aide à une taille donnée et renvoie le texte de l'écran.
+    fn help_text(w: u16, h: u16, lang: crate::i18n::Lang) -> String {
+        use crate::app::{Action, App};
+        use crate::theme::Theme;
+        let mut app = App::new();
+        app.set_startup_lang(lang);
+        app.apply(Action::ToggleHelp);
+        let theme = Theme::dark();
+        let backend = ratatui::backend::TestBackend::new(w, h);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| {
+            super::draw(f, &app, &theme);
+        })
+        .unwrap();
+        buffer_text(&term)
+    }
+
+    #[test]
+    fn l_aide_montre_toutes_les_rubriques_sur_un_terminal_classique() {
+        use crate::i18n::Lang;
+        // 80×24 : deux colonnes, descriptions entières (dont la souris).
+        let t = help_text(80, 24, Lang::En);
+        for needle in [
+            "Navigate",
+            "Playback",
+            "Queue & history",
+            "App",
+            "Mouse",
+            "quit",
+            "volume",
+        ] {
+            assert!(t.contains(needle), "{needle:?} absent à 80×24 : {t}");
+        }
+        assert!(!t.contains("…"), "rien ne doit être tronqué à 80×24");
+        // 79×24 : une colonne ne tiendrait pas → deux colonnes quand même.
+        let t = help_text(79, 24, Lang::En);
+        assert!(t.contains("quit") && t.contains("Playback"), "{t}");
+        let t = help_text(60, 24, Lang::Fr);
+        assert!(t.contains("Lecture") && t.contains("quitter"), "{t}");
+        // Terminal minuscule : le débordement est signalé, pas caché.
+        let t = help_text(24, 14, Lang::En);
+        assert!(t.contains("…"), "marqueur de troncature attendu : {t}");
+    }
+
+    #[test]
+    fn le_pied_de_la_sidebar_ne_recouvre_pas_les_sections() {
+        use crate::app::App;
+        use crate::model::{Platform, Track};
+        use crate::theme::Theme;
+        let t = Track {
+            platform: Platform::Mixcloud,
+            id: "q".into(),
+            title: "Queued".into(),
+            artist: "A".into(),
+            permalink: "https://www.mixcloud.com/a/q/".into(),
+            duration_ms: Some(1_000),
+        };
+        let mut app = App::new();
+        app.restore(vec![t], Vec::new(), Vec::new());
+        let theme = Theme::dark();
+        for h in 14..=24u16 {
+            let backend = ratatui::backend::TestBackend::new(80, h);
+            let mut term = ratatui::Terminal::new(backend).unwrap();
+            let mut regions = Regions::default();
+            term.draw(|f| {
+                regions = super::draw(f, &app, &theme);
+            })
+            .unwrap();
+            let text = buffer_text(&term);
+            // Sous 17 lignes, la sidebar (hauteur − 11) ne peut plus montrer les
+            // six sections : seule l'absence de chevauchement est exigée.
+            if h >= 17 {
+                assert!(
+                    text.contains("Queue (1)"),
+                    "compteur de file masqué à 80×{h}"
+                );
+            }
+            for row in &regions.sidebar_rows {
+                assert!(
+                    !contains(&regions.accounts_btn, row.x, row.y)
+                        && !contains(&regions.lang_btn, row.x, row.y),
+                    "pied par-dessus une section à 80×{h}"
+                );
+            }
         }
     }
 

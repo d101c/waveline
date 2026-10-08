@@ -362,10 +362,18 @@ pub struct App {
     pub lang: Lang,
     /// Fenêtre d'aide affichée par-dessus l'interface.
     pub show_help: bool,
-    /// Requête réseau en cours, s'il y en a une (spinner + filtrage des
-    /// résultats périmés).
-    pub pending: Option<Pending>,
+    /// Requêtes réseau en cours, au plus une par section (spinner + filtrage
+    /// des résultats périmés). Une recherche lancée pendant le chargement des
+    /// Likes ne fait pas perdre la réponse des Likes.
+    pending: Vec<Pending>,
     next_fetch_id: u64,
+    /// Section depuis laquelle le morceau en cours a été lancé. Depuis la vue
+    /// Historique, la liste reste stable (pas de remontée en tête), sinon
+    /// « suivant » rejouerait indéfiniment les deux premières entrées.
+    launched_from: Option<Section>,
+    /// Curseur mémorisé par section : traverser la barre latérale ne fait pas
+    /// perdre sa position dans les résultats.
+    cursors: [usize; Section::ALL.len()],
     /// Instant courant, injecté par la boucle via [`App::tick`].
     now: Instant,
     seek_accel: SeekAccel,
@@ -407,8 +415,10 @@ impl App {
             viz: VizMode::Bars,
             lang: Lang::En,
             show_help: false,
-            pending: None,
+            pending: Vec::new(),
             next_fetch_id: 0,
+            launched_from: None,
+            cursors: [0; Section::ALL.len()],
             now: Instant::now(),
             seek_accel: SeekAccel::new(),
             viewport_rows: 20,
@@ -529,11 +539,25 @@ impl App {
         }
     }
 
-    /// Sélectionne une section dans la barre latérale (sans la charger).
+    /// Sélectionne une section dans la barre latérale (sans la charger), en
+    /// mémorisant le curseur de la section quittée et en restaurant celui de
+    /// la nouvelle (borné : les listes ont pu changer entre-temps).
     pub fn select_section(&mut self, section: Section) {
+        self.cursors[self.section.index()] = self.list_index;
         self.section = section;
         self.section_index = section.index();
+        self.list_index = self.cursors[section.index()];
         self.clamp_cursor();
+    }
+
+    /// Vrai si une requête réseau est en cours.
+    pub fn is_busy(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// La requête en cours la plus récente (pour le spinner).
+    pub fn latest_pending(&self) -> Option<&Pending> {
+        self.pending.iter().max_by_key(|p| p.id)
     }
 
     // --- Dispatch ---------------------------------------------------------------
@@ -591,7 +615,7 @@ impl App {
             Action::PlayPause => {
                 // Rien en cours : joue la sélection. Sinon bascule.
                 if self.playback.current.is_none() && !self.playback.loading {
-                    self.selected_track().cloned().map(|t| self.play_track(&t))
+                    self.play_selection()
                 } else {
                     Some(Effect::Toggle)
                 }
@@ -694,28 +718,38 @@ impl App {
 
     // --- Lecture ------------------------------------------------------------------
 
-    /// Demande la lecture d'un morceau précis.
+    /// Demande la lecture d'un morceau précis, lancé depuis la section affichée.
     fn play_track(&mut self, t: &Track) -> Effect {
+        self.launched_from = Some(self.section);
         self.status = i18n::loading(self.lang);
         Effect::Play(t.permalink.clone())
+    }
+
+    /// Retire de la file l'entrée d'index `i` (jouer depuis la file la consomme).
+    fn consume_queued(&mut self, i: usize) {
+        if i < self.queue.len() {
+            self.queue.remove(i);
+            self.state_dirty = true;
+            self.clamp_cursor();
+        }
+    }
+
+    /// Joue le morceau surligné ; depuis la vue File, le consomme — quel que
+    /// soit le geste (Entrée, clic, espace).
+    fn play_selection(&mut self) -> Option<Effect> {
+        let t = self.selected_track().cloned()?;
+        if self.section == Section::Queue {
+            if let Some(&i) = self.visible_indices().get(self.list_index) {
+                self.consume_queued(i);
+            }
+        }
+        Some(self.play_track(&t))
     }
 
     fn activate(&mut self) -> Option<Effect> {
         match self.focus {
             Focus::Sidebar => self.open_section(),
-            Focus::List => {
-                let t = self.selected_track().cloned()?;
-                if self.section == Section::Queue {
-                    // Jouer depuis la file la consomme.
-                    let vis = self.visible_indices();
-                    if let Some(&i) = vis.get(self.list_index) {
-                        self.queue.remove(i);
-                        self.state_dirty = true;
-                        self.clamp_cursor();
-                    }
-                }
-                Some(self.play_track(&t))
-            }
+            Focus::List => self.play_selection(),
         }
     }
 
@@ -724,11 +758,9 @@ impl App {
         self.focus = Focus::List;
         match self.section {
             Section::Search => {
-                // Une liste déjà garnie s'affiche telle quelle ; sinon on
-                // invite directement à saisir une recherche.
-                if self.lists.search.is_empty() {
-                    self.begin_search();
-                }
+                // Ouvrir la section = proposer une recherche ; les résultats
+                // précédents restent visibles derrière l'invite (Échap annule).
+                self.begin_search();
                 None
             }
             Section::History => {
@@ -773,6 +805,7 @@ impl App {
             let t = self.queue.remove(0);
             self.state_dirty = true;
             self.clamp_cursor();
+            self.launched_from = Some(Section::Queue);
             self.status = i18n::playing_from_queue(self.lang, &t.title);
             return Some(Effect::Play(t.permalink.clone()));
         }
@@ -792,6 +825,9 @@ impl App {
         }
         self.list_index = target as usize;
         let t = self.tracks()[vis[target as usize]].clone();
+        if self.section == Section::Queue {
+            self.consume_queued(vis[target as usize]);
+        }
         Some(self.play_track(&t))
     }
 
@@ -855,6 +891,14 @@ impl App {
         let Some(t) = self.playback.current.clone() else {
             return;
         };
+        // Lancé depuis la vue Historique et déjà présent : on laisse la liste
+        // en place (elle ne bouge pas sous le curseur et « suivant » descend
+        // vers les entrées plus anciennes au lieu de rejouer les deux premières).
+        if self.launched_from == Some(Section::History)
+            && self.history.iter().any(|h| h.same_as(&t))
+        {
+            return;
+        }
         self.history.retain(|h| !h.same_as(&t));
         self.history.insert(0, t);
         self.history.truncate(HISTORY_CAP);
@@ -924,11 +968,13 @@ impl App {
 
     // --- Requêtes réseau ----------------------------------------------------------
 
-    /// Enregistre une requête en attente pour `section` et renvoie l'effet.
+    /// Enregistre une requête en attente pour `section` (remplaçant celle de
+    /// la même section, dont la réponse devient périmée) et renvoie l'effet.
     fn request(&mut self, section: Section, request: FetchRequest) -> Effect {
         self.next_fetch_id += 1;
         let id = self.next_fetch_id;
-        self.pending = Some(Pending {
+        self.pending.retain(|p| p.section != section);
+        self.pending.push(Pending {
             id,
             section,
             started: self.now,
@@ -936,23 +982,28 @@ impl App {
         Effect::Fetch { id, request }
     }
 
-    /// Livre le résultat d'une requête. Un `id` qui n'est plus celui attendu
-    /// (requête plus récente lancée entre-temps) est ignoré : la liste ne peut
-    /// pas être écrasée par une réponse en retard.
+    /// Livre le résultat d'une requête. Un `id` qui n'est plus attendu
+    /// (requête plus récente pour la même section) est ignoré : la liste ne
+    /// peut pas être écrasée par une réponse en retard. La réponse de la
+    /// requête la plus récente amène sa section à l'écran ; celle d'une
+    /// section que l'utilisateur a quittée entre-temps est rangée sans voler
+    /// la vue ni le statut.
     pub fn deliver(&mut self, id: u64, fetched: Fetched) {
-        let Some(p) = self.pending else {
+        let Some(pos) = self.pending.iter().position(|p| p.id == id) else {
             return;
         };
-        if p.id != id {
-            return;
-        }
-        self.pending = None;
+        let p = self.pending.remove(pos);
         let n = fetched.tracks.len();
         self.set_tracks(p.section, fetched.tracks);
-        self.select_section(p.section);
-        self.focus = Focus::List;
-        self.list_index = 0;
-        self.status = i18n::fetch_summary(self.lang, n, &fetched.failures);
+        let latest = p.id == self.next_fetch_id;
+        if latest || p.section == self.section {
+            self.select_section(p.section);
+            self.focus = Focus::List;
+            self.list_index = 0;
+        }
+        if latest {
+            self.status = i18n::fetch_summary(self.lang, n, &fetched.failures);
+        }
     }
 
     // --- Mode saisie ----------------------------------------------------------------
@@ -1019,6 +1070,7 @@ impl App {
                 if url.is_empty() {
                     None
                 } else if crate::providers::platform_of(&url).is_some() {
+                    self.launched_from = None;
                     self.status = i18n::loading(self.lang);
                     Some(Effect::Play(url))
                 } else {
@@ -1320,11 +1372,11 @@ mod tests {
             panic!("attendu Fetch, eu {eff:?}");
         };
         assert_eq!(request, FetchRequest::Library(LibrarySection::Likes));
-        assert!(a.pending.is_some());
+        assert!(a.is_busy());
         a.deliver(id, fetched(vec![track(Platform::SoundCloud, "like1")]));
         assert_eq!(a.section, Section::Likes);
         assert_eq!(a.tracks().len(), 1);
-        assert!(a.pending.is_none());
+        assert!(!a.is_busy());
         // Retour sur la recherche : ses résultats sont toujours là.
         a.focus = Focus::Sidebar;
         a.select_section(Section::Search);
@@ -1354,10 +1406,167 @@ mod tests {
         // La première réponse arrive en retard : ignorée.
         a.deliver(id1, fetched(vec![track(Platform::SoundCloud, "stale")]));
         assert!(a.tracks_of(Section::Search).is_empty());
-        assert!(a.pending.is_some());
+        assert!(a.is_busy());
         a.deliver(id2, fetched(vec![track(Platform::SoundCloud, "fresh")]));
         assert_eq!(a.tracks_of(Section::Search)[0].title, "fresh");
-        assert!(a.pending.is_none());
+        assert!(!a.is_busy());
+    }
+
+    #[test]
+    fn une_reponse_d_une_autre_section_est_rangee_sans_voler_la_vue() {
+        let mut a = App::new();
+        a.sc_handle = Some("me".into());
+        a.focus = Focus::Sidebar;
+        a.apply(Action::Top); // Likes
+        let Some(Effect::Fetch { id: likes_id, .. }) = a.apply(Action::Activate) else {
+            panic!("attendu Fetch");
+        };
+        // Pendant le chargement, l'utilisateur lance une recherche.
+        a.begin_search();
+        a.input_push('q');
+        let Some(Effect::Fetch { id: search_id, .. }) = a.input_submit() else {
+            panic!("attendu Fetch");
+        };
+        assert_eq!(a.pending.len(), 2, "deux requêtes en vol, une par section");
+        let searching = a.status.clone();
+        // Les Likes arrivent en premier : rangés, mais la vue et le statut de
+        // la recherche en cours sont préservés.
+        a.deliver(
+            likes_id,
+            fetched(vec![track(Platform::SoundCloud, "like1")]),
+        );
+        assert_eq!(a.tracks_of(Section::Likes).len(), 1);
+        assert_eq!(
+            a.section,
+            Section::Likes,
+            "la vue Likes était affichée : elle le reste"
+        );
+        assert_eq!(a.status, searching);
+        assert!(a.is_busy());
+        a.deliver(search_id, fetched(vec![track(Platform::Mixcloud, "hit")]));
+        assert_eq!(a.section, Section::Search);
+        assert!(!a.is_busy());
+        assert_eq!(
+            a.tracks_of(Section::Likes).len(),
+            1,
+            "les Likes n'ont pas été perdus"
+        );
+    }
+
+    #[test]
+    fn ecouter_depuis_l_historique_garde_la_liste_stable_et_enchaine_vers_le_bas() {
+        let (ta, tb, tc) = (
+            track(Platform::SoundCloud, "A"),
+            track(Platform::SoundCloud, "B"),
+            track(Platform::SoundCloud, "C"),
+        );
+        let mut a = App::new();
+        a.restore(vec![], vec![ta.clone(), tb.clone(), tc.clone()], vec![]);
+        assert_eq!(a.section, Section::History);
+        // Entrée sur A (en tête) puis enchaînement naturel.
+        assert_eq!(
+            a.apply(Action::Activate),
+            Some(Effect::Play(ta.permalink.clone()))
+        );
+        a.sync_current(Some(ta.clone()));
+        assert_eq!(
+            a.apply(Action::Next),
+            Some(Effect::Play(tb.permalink.clone()))
+        );
+        a.sync_current(Some(tb.clone()));
+        let order: Vec<_> = a.history.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(
+            order,
+            ["A", "B", "C"],
+            "la liste ne bouge pas sous le curseur"
+        );
+        assert_eq!(a.list_index, 1);
+        assert_eq!(
+            a.apply(Action::Next),
+            Some(Effect::Play(tc.permalink.clone()))
+        );
+        a.sync_current(Some(tc.clone()));
+        assert_eq!(a.apply(Action::Next), None, "fin de liste, pas de boucle");
+        // « Précédent » (tout début du morceau) remonte bien vers B.
+        a.playback.position_ms = 500;
+        assert_eq!(
+            a.apply(Action::Prev),
+            Some(Effect::Play(tb.permalink.clone()))
+        );
+        // Depuis une autre vue, l'historique reste « le plus récent en tête ».
+        let mut a = App::new();
+        a.restore(vec![], vec![ta.clone(), tb.clone()], vec![tc.clone()]);
+        a.select_section(Section::Search);
+        a.focus = Focus::List;
+        assert_eq!(
+            a.apply(Action::Activate),
+            Some(Effect::Play(tc.permalink.clone()))
+        );
+        a.sync_current(Some(tc.clone()));
+        let order: Vec<_> = a.history.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(order, ["C", "A", "B"]);
+        // Et rejouer A depuis la recherche le remonte en tête.
+        a.set_tracks(Section::Search, vec![ta.clone()]);
+        a.apply(Action::Activate);
+        a.sync_current(Some(ta.clone()));
+        assert_eq!(a.history[0].title, "A");
+    }
+
+    #[test]
+    fn espace_et_precedent_dans_la_file_consomment_aussi() {
+        let mut a = app_with_mix();
+        a.apply(Action::Enqueue); // sc1
+        a.apply(Action::Down);
+        a.apply(Action::Enqueue); // mc1
+        a.select_section(Section::Queue);
+        a.take_state_dirty();
+        // Espace sans lecture en cours : joue et consomme.
+        assert_eq!(
+            a.apply(Action::PlayPause),
+            Some(Effect::Play("https://soundcloud.com/x/sc1".into()))
+        );
+        assert_eq!(a.queue.len(), 1);
+        assert!(a.take_state_dirty());
+        // « Précédent » atterrissant sur une ligne de la file : consomme aussi.
+        a.sync_current(Some(track(Platform::SoundCloud, "sc1")));
+        a.apply(Action::Enqueue); // en vue File : refusé (déjà dans la file)
+        a.queue.insert(0, track(Platform::Mixcloud, "first"));
+        a.list_index = 1;
+        a.playback.position_ms = 0;
+        assert_eq!(
+            a.apply(Action::Prev),
+            Some(Effect::Play("https://soundcloud.com/x/first".into()))
+        );
+        assert_eq!(a.queue.len(), 1, "l'entrée jouée a été consommée");
+    }
+
+    #[test]
+    fn le_curseur_est_memorise_par_section() {
+        let mut a = app_with_mix();
+        a.apply(Action::Bottom);
+        assert_eq!(a.list_index, 2);
+        // Traverser la barre latérale (sections vides) puis revenir.
+        a.focus = Focus::Sidebar;
+        a.apply(Action::Down); // History (vide)
+        assert_eq!(a.list_index, 0);
+        a.apply(Action::Down); // Queue (vide)
+        a.apply(Action::Up);
+        a.apply(Action::Up); // Search
+        assert_eq!(a.list_index, 2, "position dans les résultats retrouvée");
+    }
+
+    #[test]
+    fn ouvrir_la_section_recherche_propose_toujours_une_saisie() {
+        let mut a = app_with_mix(); // liste de recherche non vide
+        a.focus = Focus::Sidebar;
+        a.select_section(Section::Search);
+        assert_eq!(a.apply(Action::Activate), None);
+        assert_eq!(a.input, Input::Search(String::new()));
+        assert_eq!(
+            a.tracks().len(),
+            3,
+            "les résultats restent affichés derrière"
+        );
     }
 
     #[test]

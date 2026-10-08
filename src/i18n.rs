@@ -190,13 +190,21 @@ pub fn help_mouse_items(lang: Lang) -> &'static [(&'static str, &'static str)] {
         Lang::En => &[
             ("click", "play / open / tabs"),
             ("bar", "click progress to seek"),
-            ("wheel", "scroll · on playbar: volume"),
+            ("wheel", "scroll · playbar: volume"),
         ],
         Lang::Fr => &[
             ("clic", "jouer / ouvrir / onglets"),
             ("barre", "cliquer pour sauter"),
-            ("molette", "défiler · sur la barre : vol"),
+            ("molette", "défiler · barre : volume"),
         ],
+    }
+}
+
+/// Dernière ligne de l'aide quand tout ne tient pas à l'écran.
+pub fn help_more(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "… enlarge the terminal for the rest",
+        Lang::Fr => "… agrandis le terminal pour la suite",
     }
 }
 
@@ -392,5 +400,37 @@ pub fn prompt_connect_mc_hint(lang: Lang) -> &'static str {
     match lang {
         Lang::En => "your Mixcloud handle (empty = none) · enter to confirm · esc cancels",
         Lang::Fr => "ton pseudo Mixcloud (vide = aucun) · entrée pour valider · échap annule",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// L'aide réserve, à 80 colonnes, 9 caractères aux touches et 26 à la
+    /// description (cf. `ui::draw_help`) : les gestes souris s'y tiennent aussi.
+    #[test]
+    fn les_gestes_souris_tiennent_dans_la_colonne_de_l_aide() {
+        for lang in [Lang::En, Lang::Fr] {
+            for (k, d) in help_mouse_items(lang) {
+                assert!(k.chars().count() <= 9, "{k}");
+                assert!(
+                    d.chars().count() <= 26,
+                    "« {d} » fait {} caractères",
+                    d.chars().count()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bilan_de_requete_mentionne_les_echecs() {
+        let s = fetch_summary(
+            Lang::En,
+            3,
+            &[(crate::model::Platform::Mixcloud, "HTTP 503".into())],
+        );
+        assert_eq!(s, "3 results · Mixcloud failed: HTTP 503");
+        assert_eq!(fetch_summary(Lang::Fr, 0, &[]), "Aucun résultat");
     }
 }

@@ -119,7 +119,8 @@ type PlatformResult = Option<Result<Vec<Track>, ProviderError>>;
 
 /// Interroge SoundCloud et Mixcloud **en parallèle** (threads scopés : pas de
 /// runtime async, pas de `'static`) puis entrelace les résultats. La latence
-/// perçue est celle de la plateforme la plus lente, plus la somme des deux.
+/// perçue est celle de la plateforme la plus lente (max), et non plus la somme
+/// des deux comme avec l'ancien appel séquentiel.
 fn fan_out<S, M>(sc: S, mc: M) -> Fetched
 where
     S: FnOnce() -> PlatformResult + Send,

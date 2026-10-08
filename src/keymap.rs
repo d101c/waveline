@@ -229,7 +229,7 @@ pub const BINDINGS: &[Binding] = &[
         Action::Prev,
         Group::Playback,
         "previous / restart",
-        "précédent / reprendre",
+        "précédent / redémarrer",
     ),
     b(
         &[Key::ch('l'), Key::plain(KeyCode::Right)],

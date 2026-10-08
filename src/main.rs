@@ -141,7 +141,8 @@ fn main() -> io::Result<()> {
 
     restore_terminal(&mut terminal)?;
     // Les préférences modifiées pendant la session (volume, visualiseur…) sont
-    // écrites une fois, à la sortie, plutôt qu'à chaque appui.
+    // écrites une fois, à la sortie, et seulement si elles ont changé : une
+    // instance passive n'écrase pas ce qu'une autre a enregistré.
     persist_config(&app, &mut config);
     if app.take_state_dirty() {
         persist_state(&app);
@@ -188,12 +189,15 @@ fn run(terminal: &mut Tui, app: &mut App, config: &mut Config, theme: &Theme) ->
             app.deliver(id, fetched);
         }
 
-        // Enchaînement automatique quand un morceau se termine.
+        // Enchaînement automatique quand un morceau se termine. Rien à
+        // enchaîner (fin de liste) : on arrête explicitement le moteur, qui
+        // gardait sinon le morceau terminé affiché comme « en pause ».
         let fin = player.shared().finished_generation.load(Ordering::Relaxed);
         if fin != last_finished {
             last_finished = fin;
-            if let Some(eff) = app.apply(Action::Next) {
-                dispatch_effect(eff, app, &mut rt);
+            match app.apply(Action::Next) {
+                Some(eff) => dispatch_effect(eff, app, &mut rt),
+                None => dispatch_effect(Effect::Stop, app, &mut rt),
             }
         }
 
@@ -215,7 +219,7 @@ fn run(terminal: &mut Tui, app: &mut App, config: &mut Config, theme: &Theme) ->
 
         // Cadence adaptative : ~30 fps en lecture (visualiseurs fluides) ou
         // pendant une requête (spinner), ~4 fps au repos (CPU minimal).
-        let animated = app.playback.playing || app.pending.is_some();
+        let animated = app.playback.playing || app.is_busy();
         let tick = if animated { 33 } else { 250 };
         if event::poll(Duration::from_millis(tick))? {
             let effect = match event::read()? {
@@ -252,14 +256,20 @@ fn dispatch_effect(eff: Effect, app: &App, rt: &mut Runtime<'_>) {
     }
 }
 
-/// Recopie les préférences courantes de l'app dans la config et l'écrit.
+/// Recopie les préférences courantes de l'app dans la config et l'écrit, si
+/// quelque chose a changé depuis la dernière lecture/écriture.
 fn persist_config(app: &App, config: &mut Config) {
-    config.soundcloud = app.sc_handle.clone();
-    config.mixcloud = app.mc_handle.clone();
-    config.lang = app.lang;
-    config.volume = app.playback.volume;
-    config.viz = app.viz;
-    config.save();
+    let next = Config {
+        soundcloud: app.sc_handle.clone(),
+        mixcloud: app.mc_handle.clone(),
+        lang: app.lang,
+        volume: app.playback.volume,
+        viz: app.viz,
+    };
+    if next != *config {
+        *config = next;
+        config.save();
+    }
 }
 
 /// Écrit la file et l'historique sur disque.
@@ -393,10 +403,20 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<Effect> {
 
 fn handle_mouse(app: &mut App, regions: &Regions, m: MouseEvent) -> Option<Effect> {
     let (x, y) = (m.column, m.row);
+    // Aide modale : un clic (n'importe quel bouton) la referme, tout le reste
+    // (molette…) est avalé plutôt que d'agir à l'aveugle derrière le popup.
+    if app.show_help {
+        if matches!(m.kind, MouseEventKind::Down(_)) {
+            app.dismiss_help();
+        }
+        return None;
+    }
     match m.kind {
         MouseEventKind::Down(MouseButton::Left) => {
-            if app.dismiss_help() {
-                return None;
+            // Un clic hors de l'invite l'annule : la souris agit toujours en
+            // mode normal, et la touche suivante ne tombe pas dans la saisie.
+            if !matches!(app.input, Input::Normal) {
+                app.input_cancel();
             }
             if let Some(filter) = regions.filter_at(x, y) {
                 return match filter {
@@ -447,20 +467,37 @@ fn handle_mouse(app: &mut App, regions: &Regions, m: MouseEvent) -> Option<Effec
     }
 }
 
-/// Texte collé (bracketed paste) : en saisie, il alimente la ligne d'un bloc ;
-/// en mode normal, une URL SoundCloud/Mixcloud collée ouvre directement
+/// Texte collé (bracketed paste) : en saisie, il alimente la ligne d'un bloc
+/// (sauts de ligne et tabulations ramenés à un espace) ; en mode normal, une
+/// URL SoundCloud/Mixcloud collée (première ligne non vide) ouvre directement
 /// l'invite `:` pré-remplie — il ne reste qu'à valider.
 fn handle_paste(app: &mut App, text: &str) -> Option<Effect> {
-    let clean: String = text.chars().filter(|c| !c.is_control()).collect();
-    if clean.is_empty() {
-        return None;
-    }
+    // L'aide est modale : un collage la referme, puis est traité normalement.
+    app.dismiss_help();
+    // Caractères de contrôle autres que les sauts de ligne → espace.
+    let cleaned: String = text
+        .chars()
+        .map(|c| {
+            if c.is_control() && c != '\n' && c != '\r' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
     if matches!(app.input, Input::Normal) {
         // Hors saisie, seul un lien reconnu a un sens.
-        providers::platform_of(clean.trim())?;
+        let first = cleaned.lines().map(str::trim).find(|l| !l.is_empty())?;
+        providers::platform_of(first)?;
         app.begin_command();
+        for c in first.chars() {
+            app.input_push(c);
+        }
+        return None;
     }
-    for c in clean.chars() {
+    // En saisie : une seule ligne, mots séparés par un espace.
+    let joined = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    for c in joined.chars() {
         app.input_push(c);
     }
     None
@@ -628,4 +665,103 @@ fn demo_tracks() -> Vec<Track> {
             3_584_000,
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn coller_un_lien_pendant_l_aide_la_referme_et_prepare_l_invite() {
+        let mut app = App::new();
+        app.apply(Action::ToggleHelp);
+        assert!(app.show_help);
+        handle_paste(&mut app, "https://soundcloud.com/a/b\n");
+        assert!(!app.show_help);
+        assert_eq!(
+            app.input,
+            Input::Command("https://soundcloud.com/a/b".into())
+        );
+        // La validation suivante n'est pas avalée par l'aide.
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            handle_key(&mut app, key),
+            Some(Effect::Play("https://soundcloud.com/a/b".into()))
+        );
+    }
+
+    #[test]
+    fn collage_multi_lignes_garde_la_premiere_ligne_en_mode_normal_et_joint_en_saisie() {
+        let mut app = App::new();
+        // Mode normal : texte sans lien → ignoré ; deux liens → le premier.
+        assert_eq!(handle_paste(&mut app, "hello\nworld"), None);
+        assert_eq!(app.input, Input::Normal);
+        handle_paste(
+            &mut app,
+            "\n  https://www.mixcloud.com/a/b/ \r\nhttps://soundcloud.com/c/d\n",
+        );
+        assert_eq!(
+            app.input,
+            Input::Command("https://www.mixcloud.com/a/b/".into())
+        );
+        // En saisie : lignes et tabulations → un espace, pas de mot soudé.
+        let mut app = App::new();
+        app.begin_search();
+        handle_paste(&mut app, "daft\tpunk\r\n alive  2007");
+        assert_eq!(app.input, Input::Search("daft punk alive 2007".into()));
+    }
+
+    #[test]
+    fn la_molette_pendant_l_aide_est_avalee_et_un_clic_la_referme() {
+        let mut app = App::new();
+        app.apply(Action::ToggleHelp);
+        let regions = Regions {
+            playbar: Rect::new(0, 16, 80, 7),
+            ..Regions::default()
+        };
+        let wheel = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 10,
+            row: 18,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(handle_mouse(&mut app, &regions, wheel), None);
+        assert_eq!(app.playback.volume, 80, "volume inchangé derrière le popup");
+        assert!(app.show_help);
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: 10,
+            row: 18,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(handle_mouse(&mut app, &regions, click), None);
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn un_clic_annule_une_saisie_en_cours() {
+        let mut app = App::new();
+        app.begin_search();
+        app.input_push('a');
+        let regions = Regions::default();
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(&mut app, &regions, click);
+        assert_eq!(app.input, Input::Normal);
+    }
+
+    #[test]
+    fn ctrl_c_en_saisie_quitte_au_lieu_d_inserer_un_c() {
+        let mut app = App::new();
+        app.begin_search();
+        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        handle_key(&mut app, key);
+        assert!(app.should_quit);
+        assert_ne!(app.input, Input::Search("c".into()));
+    }
 }

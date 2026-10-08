@@ -55,7 +55,10 @@ Séparation stricte état / rendu / I/O :
   État partagé (atomics + mutex) lu par l'UI sans blocage.
 - **`config`** / **`state`** — préférences (`~/.config/waveline/config.json`)
   séparées des données d'usage (`~/.local/share/waveline/state.json`), toutes
-  deux écrites atomiquement (fichier temporaire + `rename`).
+  deux écrites atomiquement (fichier temporaire + `rename`) et seulement si
+  elles ont changé. La config, éditable à la main, est lue champ par champ
+  (une valeur invalide reprend son défaut) ; un fichier illisible est mis de
+  côté en `.bak`, jamais écrasé.
 
 ### Requêtes asynchrones sans runtime
 
@@ -70,7 +73,16 @@ machinerie async.
 À la fin d'un morceau (ou sur `n`), la file a priorité ; sinon on avance depuis
 le **morceau en cours** s'il est dans la liste affichée (pas depuis le curseur,
 que l'utilisateur a pu déplacer). Aux bornes, rien n'est joué : le dernier
-titre ne boucle pas. `p` au-delà de 3 s redémarre le morceau.
+titre ne boucle pas et le moteur est explicitement arrêté (« Nothing
+playing »), pour qu'espace/`p`/`s` restent réactifs. `p` au-delà de 3 s
+redémarre le morceau. Jouer un morceau *depuis la file* le consomme, quel que
+soit le geste (Entrée, espace, `p`).
+
+L'historique est « le plus récent en tête », sauf quand on écoute **depuis la
+vue Historique** : la liste affichée reste alors stable (pas de remontée en
+tête), sinon « suivant » rejouerait indéfiniment les deux premières entrées.
+L'identité d'un morceau (`Track::same_as`) compare plateforme + identifiant,
+avec repli sur le permalink (morceaux de démo, URL collée).
 
 ## Modèle de données
 

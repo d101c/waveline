@@ -54,8 +54,18 @@ pub struct Track {
 impl Track {
     /// Deux entrées désignent le même morceau si plateforme et identifiant
     /// coïncident (le titre ou la durée peuvent varier entre deux réponses API).
+    /// À défaut d'identifiant commun (morceau de démonstration ou URL collée,
+    /// dont l'`id` n'est pas celui de l'API), un même permalink suffit.
     pub fn same_as(&self, other: &Track) -> bool {
-        self.platform == other.platform && self.id == other.id
+        if self.platform != other.platform {
+            return false;
+        }
+        if self.id == other.id {
+            return true;
+        }
+        let a = self.permalink.trim_end_matches('/');
+        let b = other.permalink.trim_end_matches('/');
+        !a.is_empty() && a.eq_ignore_ascii_case(b)
     }
 
     /// Durée formatée `H:MM:SS` ou `M:SS`, ou `--:--` si inconnue.
@@ -89,6 +99,48 @@ mod tests {
         assert_eq!(fmt_duration(290_000), "4:50");
         assert_eq!(fmt_duration(3_731_000), "1:02:11");
         assert_eq!(fmt_duration(0), "0:00");
+    }
+
+    #[test]
+    fn same_as_compare_l_id_puis_le_permalink() {
+        let mk = |p, id: &str, link: &str| Track {
+            platform: p,
+            id: id.into(),
+            title: "t".into(),
+            artist: "a".into(),
+            permalink: link.into(),
+            duration_ms: None,
+        };
+        let api = mk(
+            Platform::SoundCloud,
+            "soundcloud:tracks:1",
+            "https://soundcloud.com/a/t",
+        );
+        let demo = mk(
+            Platform::SoundCloud,
+            "https://soundcloud.com/a/t",
+            "https://soundcloud.com/a/t/",
+        );
+        assert!(api.same_as(&demo), "même permalink (slash final ignoré)");
+        assert!(api.same_as(&api));
+        let other = mk(
+            Platform::SoundCloud,
+            "soundcloud:tracks:2",
+            "https://soundcloud.com/a/u",
+        );
+        assert!(!api.same_as(&other));
+        let mc = mk(
+            Platform::Mixcloud,
+            "soundcloud:tracks:1",
+            "https://soundcloud.com/a/t",
+        );
+        assert!(!api.same_as(&mc), "plateformes différentes");
+        let empty_a = mk(Platform::SoundCloud, "x", "");
+        let empty_b = mk(Platform::SoundCloud, "y", "");
+        assert!(
+            !empty_a.same_as(&empty_b),
+            "permalinks vides : jamais égaux"
+        );
     }
 
     #[test]
